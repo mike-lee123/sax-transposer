@@ -7,7 +7,7 @@ key, and re-derives octave dots and note spellings from the written pitch.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 LETTERS = ["C", "D", "E", "F", "G", "A", "B"]
 NAT = [0, 2, 4, 5, 7, 9, 11]  # also the major scale in semitones
@@ -218,11 +218,31 @@ def _acc_char(c: str) -> int:
     return 0
 
 
-def _slur_closes(text: str, i: int) -> bool:
-    """Whether the "(" at i has a matching ")" before the end of the next melody line."""
-    depth, breaks = 0, 0
+MAX_SLUR_NOTES = 12
+
+
+def _slur_closes(text: str, i: int, mode: str) -> bool:
+    """Whether the "(" at i is a real legato slur or tie: it has a matching ")" before the end of the
+    next melody line, holds no rest or double bar line, and covers at most MAX_SLUR_NOTES notes.
+
+    Brackets put round a whole phrase or line (a common misreading) fail these checks and are not drawn.
+    """
+    depth, breaks, notes, chord = 0, 0, 0, False
     for j in range(i, len(text)):
         c = text[j]
+        if chord:
+            chord = c != "]"
+            continue
+        if c == "[":
+            chord = True
+        elif c == "0" and (mode == "jianpu" or not (j and text[j - 1] in "ABCDEFG#♯b♭-")):
+            return False  # a rest: legato never runs through silence
+        elif text.startswith("||", j) or c == ":":
+            return False
+        elif (mode == "jianpu" and c in "1234567") or (mode == "names" and c in "ABCDEFG"):
+            notes += 1
+            if notes > MAX_SLUR_NOTES:
+                return False
         if c == "(":
             depth += 1
         elif c == ")":
@@ -319,7 +339,7 @@ def parse(text: str, mode: str) -> Parsed:
             while j < len(text) and text[j] in " \t":  # the arc starts at the first note: spaces go before it
                 j += 1
             buf.append(text[i + 1:j])
-            if _slur_closes(text, i):
+            if _slur_closes(text, i, mode):
                 flush()
                 slurs += 1
                 segs.append(Seg("slur", "("))
@@ -388,13 +408,11 @@ MOVE_COST = 1.0  # per note moved an octave away from the rest of the tune
 
 
 def note_cost(w: int) -> float:
-    """How awkward an in-range written pitch is: 0 from D4 up to C♯6 (octave key, no palm keys)."""
-    if w < 60:  # B♭3, B3: hard to play softly and in tune
+    """How awkward an in-range written pitch is: 0 from C4 up to C♯6 (octave key, no palm keys)."""
+    if w < 60:  # B♭3, B3: a little hard to play softly and in tune
+        return 0.5
+    if w > 85:  # D6–F♯6: palm keys, hard to play in tune and tiring over a whole tune
         return 1
-    if w < 62:  # C4, C♯4
-        return 0.5
-    if w > 85:  # D6–F♯6: palm keys
-        return 0.5
     return 0
 
 
@@ -448,13 +466,15 @@ def best_octave(notes: list[Note], inst: Instrument, high: int) -> int:
 @dataclass
 class Result:
     parsed: Parsed
-    src: Key
+    src: Key  # concert key the tune is played in (the original key unless moved with `play`)
     tgt: Key
     inst: Instrument
     octave: int
     auto_octave: int
     high: int
     lyric_lines: set[int] = field(default_factory=set)
+    orig: Key | None = None  # key of the score as written, when the tune was moved to another key
+    shift: int = 0  # semitones from orig to src
     jianpu: str = ""
     jianpu_ascii: str = ""
     names: str = ""
@@ -481,6 +501,11 @@ class Result:
 
     def written_octave(self, n: Note) -> int:
         return round((n.written - (60 + self.tgt.pc) - NAT[n.deg - 1] - n.acc) / 12)
+
+    def chord(self, raw: str, ascii_acc: bool = False) -> str:
+        """A chord symbol of the score, as the saxophonist reads it."""
+        inst = replace(self.inst, semis=self.inst.semis + self.shift)
+        return transpose_chord(raw, self.orig or self.src, self.tgt, inst, ascii_acc)
 
 
 def transpose_chord(raw: str, src: Key, tgt: Key, inst: Instrument, ascii_acc: bool = False) -> str:
@@ -510,10 +535,17 @@ def _esc(s: str) -> str:
 
 
 def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int = 0,
-              octave: int | None = None, fix_single: bool = False, high_fs: bool = False) -> Result:
+              octave: int | None = None, fix_single: bool = False, high_fs: bool = False,
+              play: Key | None = None) -> Result:
+    """play: move the tune to this concert key (by the nearest interval) before writing it for the sax."""
     parsed = parse(text, mode)
     notes = parsed.notes
     assign_pitches(notes, src, ref_octave, mode)
+    orig, shift = None, 0
+    if play is not None and play.pc != src.pc:
+        orig, shift, src = src, wrap(play.pc - src.pc), play
+        for n in notes:
+            n.midi += shift
     high = HIGHEST_FS if high_fs else HIGHEST
     auto = best_octave(notes, inst, high)
     k = auto if octave is None else octave
@@ -527,7 +559,7 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
     for n, w, f in zip(notes, ws, flags):
         n.written, n.flag = w, f
 
-    res = Result(parsed, src, tgt, inst, k, auto, high, attach_lyrics(text, notes))
+    res = Result(parsed, src, tgt, inst, k, auto, high, attach_lyrics(text, notes), orig, shift)
     uni, asc, names, html = [], [], [], []
     line = 1
 
@@ -572,9 +604,9 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
             names.append(f"記譜：{tgt.name} 大調")
             html.append(f'<span class="kh">1={_esc(tgt.jianpu)}</span>')
         elif s.kind == "chord":
-            c = transpose_chord(s.text, src, tgt, inst)
+            c = res.chord(s.text)
             uni.append(f"[{c}]"); names.append(f"[{c}]")
-            asc.append(f"[{transpose_chord(s.text, src, tgt, inst, ascii_acc=True)}]")
+            asc.append(f"[{res.chord(s.text, ascii_acc=True)}]")
             html.append(f'<span class="ch">{_esc(c)}</span>')
         elif s.kind == "slur":
             uni.append(s.text); asc.append(s.text); names.append(s.text)
@@ -619,10 +651,11 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
     return res
 
 
-def compare_instruments(text: str, mode: str, src: Key, ref_octave: int = 0, high_fs: bool = False) -> list[dict]:
+def compare_instruments(text: str, mode: str, src: Key, ref_octave: int = 0, high_fs: bool = False,
+                        play: Key | None = None) -> list[dict]:
     rows = []
     for inst in INSTRUMENTS:
-        r = transpose(text, mode, src, inst, ref_octave, fix_single=True, high_fs=high_fs)
+        r = transpose(text, mode, src, inst, ref_octave, fix_single=True, high_fs=high_fs, play=play)
         ws = [n.written for n in r.notes]
         span = "—"
         if ws:

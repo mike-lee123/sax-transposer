@@ -52,7 +52,7 @@ def _tokens(res: tp.Result) -> list[list[tuple]]:
         elif s.kind == "key":
             lines[-1].append(("text", f"1={res.tgt.jianpu}"))
         elif s.kind == "chord":
-            lines[-1].append(("chord", tp.transpose_chord(s.text, res.src, res.tgt, res.inst)))
+            lines[-1].append(("chord", res.chord(s.text)))
         elif s.kind == "rest":
             lines[-1].append(("rest", s))
         elif s.kind == "slur":
@@ -218,7 +218,9 @@ def build_pdf(res: tp.Result, title: str = "") -> bytes:
     y = MARGIN
     heading = f"{title}　{res.inst.name}譜" if title else f"{res.inst.name}譜"
     page.insert_text((MARGIN, y + 16), heading, fontname=FONT, fontsize=20)
-    info = (f"原曲 1={res.src.jianpu}（{res.src.label}）→ 記譜 1={res.tgt.jianpu}（{tp.sig_long(res.tgt.sig)}）"
+    moved = f"→ 移到 1={res.src.jianpu} " if res.orig else ""
+    orig = res.orig or res.src
+    info = (f"原曲 1={orig.jianpu}（{orig.label}）{moved}→ 記譜 1={res.tgt.jianpu}（{tp.sig_long(res.tgt.sig)}）"
             f"　實際聲音{tp.octave_words(res.octave)}")
     page.insert_text((MARGIN, y + 38), info, fontname=FONT, fontsize=9.5, color=GREY)
     y += 62

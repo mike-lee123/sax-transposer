@@ -141,6 +141,13 @@ with st.sidebar:
         format_func=lambda i: "自動（依譜中的 1=）" if i == "auto"
         else f"{tp.SOURCE_KEYS[i].label}　1={tp.SOURCE_KEYS[i].jianpu}",
     )
+    play_choice = st.selectbox(
+        "演奏調性（移到別的調）", ["same"] + list(range(len(tp.SOURCE_KEYS))), key="play_key",
+        format_func=lambda i: "與原曲相同" if i == "same"
+        else f"{tp.SOURCE_KEYS[i].label}　1={tp.SOURCE_KEYS[i].jianpu}",
+        help="整首歌移到另一個調演奏（例如配合歌手的音域，或讓旋律落在比較好吹的音區），"
+             "會往最近的方向移，最多六個半音。和弦一起移調。",
+    )
     ref_octave = st.selectbox(
         "簡譜中音 1 的實際音高", [0, -1, 1], key="ref_oct",
         format_func=lambda r: {0: "中央 C 到上方 B 之間（預設）", -1: "低一個八度", 1: "高一個八度"}[r],
@@ -247,7 +254,8 @@ if key_choice == "auto":
     src = header and tp.key_from_text(header.name.replace("♯", "#").replace("♭", "b")) or tp.SOURCE_KEYS[0]
 else:
     src = tp.SOURCE_KEYS[key_choice]
-res = tp.transpose(text, mode, src, inst, ref_octave if mode == "jianpu" else 0, octave, fix_single, high_fs)
+play = None if play_choice == "same" else tp.SOURCE_KEYS[play_choice]
+res = tp.transpose(text, mode, src, inst, ref_octave if mode == "jianpu" else 0, octave, fix_single, high_fs, play)
 
 with right:
     notes = res.notes
@@ -268,7 +276,10 @@ with right:
 
         auto_note = "（自動選擇）" if octave is None else ""
         st.markdown(
-            f"**原曲** 1={src.jianpu}（{src.label}）→ **{inst.name}記譜** 1={res.tgt.jianpu}"
+            f"**原曲** 1={src.jianpu}（{src.label}）"
+            + (f"→ **移到** 1={res.src.jianpu}（{'升' if res.shift > 0 else '降'} {abs(res.shift)} 個半音）"
+               if res.orig else "")
+            + f"→ **{inst.name}記譜** 1={res.tgt.jianpu}"
             f"（{res.tgt.label}，{tp.sig_long(res.tgt.sig)}）  \n"
             f"每個音{inst.interval}；實際聲音{tp.octave_words(res.octave)}{auto_note}。"
             + ("" if key_choice != "auto" or header else "  \n:orange[譜中沒有寫 1=，暫時當作 C 調。請在左側欄選擇原曲調性。]")
@@ -359,7 +370,7 @@ with right:
 
         with st.container(border=True):
             st.subheader(":material/compare_arrows: 哪一種薩克斯風最適合？", anchor=False)
-            cmp = pd.DataFrame(tp.compare_instruments(text, mode, src, ref_octave if mode == "jianpu" else 0, high_fs))
+            cmp = pd.DataFrame(tp.compare_instruments(text, mode, src, ref_octave if mode == "jianpu" else 0, high_fs, play))
             st.dataframe(
                 cmp, hide_index=True,
                 column_config={"需移八度的音": st.column_config.NumberColumn("需移八度的音（個）", format="%d")},
