@@ -1,0 +1,8 @@
+# API keys: never upload. Paste them into Streamlit Cloud's Secrets instead.
+.streamlit/secrets.toml
+
+__pycache__/
+*.pyc
+.claude/
+run.bat
+*.pdf
