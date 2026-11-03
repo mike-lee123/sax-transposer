@@ -33,6 +33,17 @@ def _text_w(text: str) -> float:
     return sum(SPACE if c == " " else _w(c) for c in text)
 
 
+class _Shown:
+    """A note as printed in the sax part: its digit, accidental and octave dots (see Result.shown).
+    Everything else (rhythm, lyrics, range flag) comes from the note itself."""
+
+    def __init__(self, note: tp.Note, deg: int, acc: int, o: int):
+        self.note, self.deg, self.acc, self.o = note, deg, acc, o
+
+    def __getattr__(self, name: str):
+        return getattr(self.note, name)
+
+
 def _tokens(res: tp.Result) -> list[list[tuple]]:
     """Split the score into source lines of (kind, value) tokens; text is cut after every bar line.
 
@@ -50,7 +61,7 @@ def _tokens(res: tp.Result) -> list[list[tuple]]:
                     elif piece:
                         lines[-1].append(("text", piece))
         elif s.kind == "key":
-            lines[-1].append(("text", f"1={res.tgt.jianpu}"))
+            lines[-1].append(("text", f"1={res.key_label}"))
         elif s.kind == "chord":
             lines[-1].append(("chord", res.chord(s.text)))
         elif s.kind == "rest":
@@ -58,10 +69,10 @@ def _tokens(res: tp.Result) -> list[list[tuple]]:
         elif s.kind == "slur":
             lines[-1].append(("slur", s.text))
         else:
-            lines[-1].append(("note", s.note))
+            lines[-1].append(("note", _Shown(s.note, *res.shown(s.note))))
     lines = [ln for i, ln in enumerate(lines, 1) if i not in res.lyric_lines]
     if not any(s.kind == "key" for s in res.parsed.segs):
-        lines.insert(0, [("text", f"1={res.tgt.jianpu}")])
+        lines.insert(0, [("text", f"1={res.key_label}")])
     return lines
 
 
@@ -168,7 +179,7 @@ def _draw_row(page: pymupdf.Page, row: list[tuple], y: float, res: tp.Result, op
             digit = str(v.deg)
             dw = _w(digit)
             page.insert_text((x, y), digit, fontname=FONT, fontsize=SIZE, color=color)
-            o = res.written_octave(v)
+            o = v.o
             if o > 0:
                 for s in slurs + tuplets:
                     s[1] = True
@@ -220,8 +231,9 @@ def build_pdf(res: tp.Result, title: str = "") -> bytes:
     page.insert_text((MARGIN, y + 16), heading, fontname=FONT, fontsize=20)
     moved = f"→ 移到 1={res.src.jianpu} " if res.orig else ""
     orig = res.orig or res.src
-    info = (f"原曲 1={orig.jianpu}（{orig.label}）{moved}→ 記譜 1={res.tgt.jianpu}（{tp.sig_long(res.tgt.sig)}）"
-            f"　實際聲音{tp.octave_words(res.octave)}")
+    written = ("記譜 1=C（固定 C 指法：中音 1＝左手中指 C）" if res.fixed_c
+               else f"記譜 1={res.tgt.jianpu}（{tp.sig_long(res.tgt.sig)}）")
+    info = f"原曲 1={orig.jianpu}（{orig.label}）{moved}→ {written}　八度：{res.octave_text}"
     page.insert_text((MARGIN, y + 38), info, fontname=FONT, fontsize=9.5, color=GREY)
     y += 62
 

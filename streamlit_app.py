@@ -90,8 +90,9 @@ def cached_read(files: tuple[tuple[str, bytes], ...], include_lyrics: bool, prov
 
 
 @st.cache_data(max_entries=50, show_spinner=False)
-def cached_key_options(text: str, mode: str, src: tp.Key, inst_id: str, ref: int, high_fs: bool) -> list[dict]:
-    return tp.key_options(text, mode, src, tp.INSTRUMENT_BY_ID[inst_id], ref, high_fs)
+def cached_key_options(text: str, mode: str, src: tp.Key, inst_id: str, ref: int, high_fs: bool,
+                       fixed_c: bool) -> list[dict]:
+    return tp.key_options(text, mode, src, tp.INSTRUMENT_BY_ID[inst_id], ref, high_fs, fixed_c)
 
 
 @st.cache_data(ttl="1h", max_entries=5, show_spinner=False)
@@ -141,6 +142,12 @@ with st.sidebar:
         width="stretch",
     )
     inst = tp.INSTRUMENT_BY_ID[inst_id]
+    fixed_c = st.segmented_control(
+        "簡譜寫法", ["fixed", "movable"], default="fixed", required=True, key="notation_style", width="stretch",
+        format_func={"fixed": "固定 C 指法", "movable": "首調（跟 1= 換指法）"}.get,
+        help="固定 C 指法：不管什麼調，譜都寫成 1=C，中音 1＝左手中指的 C，1̣＝低音 C，1̇＝加八度鍵的 C，"
+             "要升降的音直接標 ♯／♭。首調：譜寫成記譜調（例如 1=G），1 就按那個調的主音。",
+    ) == "fixed"
     key_choice = st.selectbox(
         "原曲調性（實音）", ["auto"] + list(range(len(tp.SOURCE_KEYS))), key="src_key",
         format_func=lambda i: "自動（依譜中的 1=）" if i == "auto"
@@ -261,14 +268,14 @@ if key_choice == "auto":
 else:
     src = tp.SOURCE_KEYS[key_choice]
 ref = ref_octave if mode == "jianpu" else 0
-options = cached_key_options(text, mode, src, inst_id, ref, high_fs)
+options = cached_key_options(text, mode, src, inst_id, ref, high_fs, fixed_c)
 if play_choice == "auto" and options:
     play = options[0]["key"]
     if octave is None:
         octave = options[0]["octave"]
 else:
     play = None if play_choice in ("same", "auto") else tp.SOURCE_KEYS[play_choice]
-res = tp.transpose(text, mode, src, inst, ref_octave if mode == "jianpu" else 0, octave, fix_single, high_fs, play)
+res = tp.transpose(text, mode, src, inst, ref, octave, fix_single, high_fs, play, fixed_c)
 
 with right:
     notes = res.notes
@@ -282,9 +289,12 @@ with right:
         else:
             status = "全部可吹"
         with st.container(horizontal=True):
-            st.metric("記譜調", f"1={res.tgt.jianpu}", border=True)
-            st.metric("調號", tp.sig_short(res.tgt.sig), border=True)
-            st.metric("實際聲音", tp.octave_words(res.octave), border=True)
+            st.metric("記譜調", f"1={res.key_label}", border=True)
+            if fixed_c:
+                st.metric("要吹升降的音", sum(res.shown(n)[1] != 0 for n in notes), border=True)
+            else:
+                st.metric("調號", tp.sig_short(res.tgt.sig), border=True)
+            st.metric("實際聲音", res.octave_text, border=True)
             st.metric("音域檢查", status, border=True)
 
         auto_note = "（自動選擇）" if octave is None else ""
@@ -292,15 +302,16 @@ with right:
             f"**原曲** 1={src.jianpu}（{src.label}）"
             + (f"→ **移到** 1={res.src.jianpu}（{'升' if res.shift > 0 else '降'} {abs(res.shift)} 個半音）"
                if res.orig else "")
-            + f"→ **{inst.name}記譜** 1={res.tgt.jianpu}"
-            f"（{res.tgt.label}，{tp.sig_long(res.tgt.sig)}）  \n"
-            f"每個音{inst.interval}；實際聲音{tp.octave_words(res.octave)}{auto_note}。"
+            + (f"→ **{inst.name}記譜** 1=C（固定 C 指法：中音 1＝左手中指 C，升降直接標在音上）  \n" if fixed_c
+               else f"→ **{inst.name}記譜** 1={res.tgt.jianpu}（{res.tgt.label}，{tp.sig_long(res.tgt.sig)}）  \n")
+            + f"每個音{inst.interval}；八度：{res.octave_text}{auto_note}。"
             + ("" if key_choice != "auto" or header else "  \n:orange[譜中沒有寫 1=，暫時當作 C 調。請在左側欄選擇原曲調性。]")
         )
         if options:
             best = options[0]
             if play_choice == "auto":
-                st.success(f"自動推薦：{best['演奏調性']}，{inst.name}記譜 {best['記譜調']}，音域 {best['記譜音域']}。",
+                written = "1=C（固定 C 指法）" if fixed_c else best["記譜調"]
+                st.success(f"自動推薦：{best['演奏調性']}，{inst.name}記譜 {written}，音域 {best['記譜音域']}。",
                            icon=":material/recommend:")
             with st.expander(f"{inst.name}吹這首歌，各調好不好吹", icon=":material/tune:",
                              expanded=play_choice == "auto"):
@@ -348,7 +359,9 @@ with right:
                 "</style>"
                 f'<div class="jp">{res.html}</div>'
             )
-            st.caption("簡譜八度以記譜 C4–B4 之間的 1 為中音。滑鼠移到音符上可看記譜音名和實音。"
+            st.caption(("固定 C 指法：中音 1＝左手中指的 C，1̣＝低音 C，1̇＝加八度鍵的 C。" if fixed_c
+                        else "簡譜八度以記譜 C4–B4 之間的 1 為中音。")
+                       + "滑鼠移到音符上可看記譜音名和實音。"
                        "紅色＝超出音域，橘色＝已移八度。底線＝八分音符（兩條＝十六分），上方的 3＝三連音。")
             t1, t2, t3 = st.tabs(["簡譜（點號）", "簡譜（純文字）", "記譜音名"])
             t1.code(res.jianpu, language=None, wrap_lines=True)
@@ -358,13 +371,13 @@ with right:
             with st.container(horizontal=True):
                 st.download_button(
                     "下載 PDF 曲譜", icon=":material/picture_as_pdf:", type="primary",
-                    data=build_pdf(res, title), file_name=f"sax-{inst.id}-1={res.tgt.jianpu_ascii}.pdf",
+                    data=build_pdf(res, title), file_name=f"sax-{inst.id}-1={res.key_label_ascii}.pdf",
                     mime="application/pdf",
                 )
                 st.download_button(
                     "下載文字檔", icon=":material/download:",
-                    data=f"{inst.name} 記譜 1={res.tgt.jianpu}\n\n{res.jianpu}\n\n--- 純文字 ---\n{res.jianpu_ascii}\n\n--- 記譜音名 ---\n{res.names}\n",
-                    file_name=f"sax-{inst.id}-1={res.tgt.jianpu_ascii}.txt", mime="text/plain",
+                    data=f"{inst.name} 記譜 1={res.key_label}\n\n{res.jianpu}\n\n--- 純文字 ---\n{res.jianpu_ascii}\n\n--- 記譜音名 ---\n{res.names}\n",
+                    file_name=f"sax-{inst.id}-1={res.key_label_ascii}.txt", mime="text/plain",
                 )
 
         with st.container(border=True):
@@ -401,7 +414,7 @@ with right:
 
         with st.container(border=True):
             st.subheader(":material/compare_arrows: 哪一種薩克斯風最適合？", anchor=False)
-            cmp = pd.DataFrame(tp.compare_instruments(text, mode, src, ref_octave if mode == "jianpu" else 0, high_fs, play))
+            cmp = pd.DataFrame(tp.compare_instruments(text, mode, src, ref, high_fs, play, fixed_c))
             st.dataframe(
                 cmp, hide_index=True,
                 column_config={"需移八度的音": st.column_config.NumberColumn("需移八度的音（個）", format="%d")},

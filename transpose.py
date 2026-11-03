@@ -475,6 +475,23 @@ class Result:
     lyric_lines: set[int] = field(default_factory=set)
     orig: Key | None = None  # key of the score as written, when the tune was moved to another key
     shift: int = 0  # semitones from orig to src
+    fixed_c: bool = False  # write the sax part with fixed C fingering: 1 = written C5, accidentals on the notes
+
+    @property
+    def key_label(self) -> str:
+        return "C" if self.fixed_c else self.tgt.jianpu
+
+    @property
+    def key_label_ascii(self) -> str:
+        return "C" if self.fixed_c else self.tgt.jianpu_ascii
+
+    def shown(self, n: Note) -> tuple[int, int, int]:
+        """(digit, accidental, octave dots) of a note as printed in the sax part."""
+        if not self.fixed_c:
+            return n.deg, n.acc, self.written_octave(n)
+        letter = (self.tgt.l + n.deg - 1) % 7
+        acc = wrap(n.written % 12 - NAT[letter])
+        return letter + 1, acc, (n.written - acc) // 12 - 1 - 5  # middle "1" is C5 (left middle finger)
     jianpu: str = ""
     jianpu_ascii: str = ""
     names: str = ""
@@ -501,6 +518,15 @@ class Result:
 
     def written_octave(self, n: Note) -> int:
         return round((n.written - (60 + self.tgt.pc) - NAT[n.deg - 1] - n.acc) / 12)
+
+    @property
+    def octave_text(self) -> str:
+        """The octave shift in words; after a key change it is relative to the moved tune, not the original."""
+        if not self.orig:
+            return octave_words(self.octave)
+        if self.octave == 0:
+            return "不另外升降八度"
+        return f"再{'降' if self.octave < 0 else '升'}{['', '一', '兩', '三'][abs(self.octave)]}個八度"
 
     def chord(self, raw: str, ascii_acc: bool = False) -> str:
         """A chord symbol of the score, as the saxophonist reads it."""
@@ -536,8 +562,9 @@ def _esc(s: str) -> str:
 
 def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int = 0,
               octave: int | None = None, fix_single: bool = False, high_fs: bool = False,
-              play: Key | None = None) -> Result:
-    """play: move the tune to this concert key (by the nearest interval) before writing it for the sax."""
+              play: Key | None = None, fixed_c: bool = False) -> Result:
+    """play: move the tune to this concert key (by the nearest interval) before writing it for the sax.
+    fixed_c: write the sax part for players who read every jianpu with C fingering (see Result.shown)."""
     parsed = parse(text, mode)
     notes = parsed.notes
     assign_pitches(notes, src, ref_octave, mode)
@@ -559,7 +586,7 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
     for n, w, f in zip(notes, ws, flags):
         n.written, n.flag = w, f
 
-    res = Result(parsed, src, tgt, inst, k, auto, high, attach_lyrics(text, notes), orig, shift)
+    res = Result(parsed, src, tgt, inst, k, auto, high, attach_lyrics(text, notes), orig, shift, fixed_c)
     uni, asc, names, html = [], [], [], []
     line = 1
 
@@ -591,18 +618,18 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
 
     has_key = any(s.kind == "key" for s in parsed.segs)
     if not has_key:
-        uni.append(f"1={tgt.jianpu}\n")
-        asc.append(f"1={tgt.jianpu_ascii}\n")
+        uni.append(f"1={res.key_label}\n")
+        asc.append(f"1={res.key_label_ascii}\n")
         names.append(f"記譜：{tgt.name} 大調\n")
-        html.append(f'<span class="kh">1={_esc(tgt.jianpu)}</span>\n')
+        html.append(f'<span class="kh">1={_esc(res.key_label)}</span>\n')
 
     for s in parsed.segs:
         if s.kind == "text":
             uni.append(s.text); asc.append(s.text); names.append(s.text); html_text(s.text)
         elif s.kind == "key":
-            uni.append(f"1={tgt.jianpu}"); asc.append(f"1={tgt.jianpu_ascii}")
+            uni.append(f"1={res.key_label}"); asc.append(f"1={res.key_label_ascii}")
             names.append(f"記譜：{tgt.name} 大調")
-            html.append(f'<span class="kh">1={_esc(tgt.jianpu)}</span>')
+            html.append(f'<span class="kh">1={_esc(res.key_label)}</span>')
         elif s.kind == "chord":
             c = res.chord(s.text)
             uni.append(f"[{c}]"); names.append(f"[{c}]")
@@ -622,16 +649,16 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
             html.append(f'<span class="n r u{s.ul}"><span class="d">0</span>{"·" * s.dot}</span>')
         else:
             n = s.note
-            o = res.written_octave(n)
+            deg, acc, o = res.shown(n)
             rhythm = "·" * n.dot + "_" * n.ul
-            uni.append(acc_sym(n.acc) + str(n.deg) + _dots(o) + rhythm)
-            asc.append(acc_ascii(n.acc) + "." * max(0, -o) + str(n.deg) + "'" * max(0, o) + rhythm)
+            uni.append(acc_sym(acc) + str(deg) + _dots(o) + rhythm)
+            asc.append(acc_ascii(acc) + "." * max(0, -o) + str(deg) + "'" * max(0, o) + rhythm)
             names.append(spell(n.written, (tgt.l + n.deg - 1) % 7, ascii_acc=True) + rhythm)
             tip = f"記譜 {res.written_name(n)} · 實音 {res.concert_name(n)}"
             up = f'<span class="up">{"<i></i>" * o}</span>' if o > 0 else ""
             dn = f'<span class="dn">{"<i></i>" * -o}</span>' if o < 0 else ""
-            ac = f'<span class="acc">{acc_sym(n.acc)}</span>' if n.acc else ""
-            head = f'{ac}<span class="d">{n.deg}{up}{dn}</span>{"·" * n.dot}'
+            ac = f'<span class="acc">{acc_sym(acc)}</span>' if acc else ""
+            head = f'{ac}<span class="d">{deg}{up}{dn}</span>{"·" * n.dot}'
             if any(n.lyrics):  # stack the syllables under the note; the column is as wide as the longest one
                 ly = "".join(f"<span>{_esc(t) or '&nbsp;'}</span>" for t in n.lyrics)
                 head = f'<span class="nh">{head}</span><span class="ly">{ly}</span>'
@@ -641,7 +668,7 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
                 "行": n.line, "第幾個音": n.idx,
                 "原譜": acc_sym(n.acc) + str(n.deg) + _dots(n.oct) if mode == "jianpu" else res.concert_name(n),
                 "實音": res.concert_name(n),
-                "薩克斯風簡譜": acc_sym(n.acc) + str(n.deg) + _dots(o),
+                "薩克斯風簡譜": acc_sym(acc) + str(deg) + _dots(o),
                 "記譜音名": res.written_name(n),
                 "狀態": {"out": "超出音域", "moved": "已移八度"}.get(n.flag, "可吹"),
             })
@@ -652,36 +679,41 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
 
 
 COMFORT_LOW, COMFORT_HIGH = 62, 81  # written D4–A5: no low pinky keys, no top-register notes
+COMFORT_HIGH_FIXED_C = 85  # with fixed C fingering up to C♯6 reads as a plain dotted note: no palm keys yet
 
 
 def key_options(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int = 0,
-                high_fs: bool = False) -> list[dict]:
+                high_fs: bool = False, fixed_c: bool = False) -> list[dict]:
     """Every key the tune could be moved to on this instrument, easiest first.
 
     For each key the best octave is chosen. A key costs, in order of weight: notes that must be
-    moved an octave, notes outside the comfortable D4–A5 range, sharps or flats in the written
-    key signature, and how far it moves from the original key.
+    moved an octave, notes outside the comfortable range, sharps or flats to read (the written key
+    signature, or with fixed C fingering every note that carries ♯ or ♭), and how far it moves
+    from the original key.
     """
+    high_ok = COMFORT_HIGH_FIXED_C if fixed_c else COMFORT_HIGH
     rows = []
     for key in SOURCE_KEYS:
         if key == Key(4, -1):  # G♭ sounds the same as F♯
             continue
         best = None
         for k in (0, -1, 1, -2, 2, -3):
-            r = transpose(text, mode, src, inst, ref_octave, k, True, high_fs, key)
+            r = transpose(text, mode, src, inst, ref_octave, k, True, high_fs, key, fixed_c)
             if not r.notes:
                 return []
-            uncomfortable = sum(not COMFORT_LOW <= n.written <= COMFORT_HIGH for n in r.notes)
+            uncomfortable = sum(not COMFORT_LOW <= n.written <= high_ok for n in r.notes)
+            accidentals = sum(r.shown(n)[1] != 0 for n in r.notes) if fixed_c else 2 * abs(r.tgt.sig)
             score = (1000 * r.out_count + 3 * r.moved_count + uncomfortable
-                     + 2 * abs(r.tgt.sig) + 0.5 * abs(r.shift) + 0.5 * abs(k))
+                     + accidentals + 0.5 * abs(r.shift) + 0.5 * abs(k))
             if best is None or score < best[0]:
                 best = (score, k, r, uncomfortable)
         score, k, r, uncomfortable = best
         lo = min(r.notes, key=lambda n: n.written)
         hi = max(r.notes, key=lambda n: n.written)
+        sharps_flats = sum(r.shown(n)[1] != 0 for n in r.notes)
         rows.append({
             "演奏調性": f"1={key.jianpu}" + ("（原調）" if key.pc == src.pc else f"（{'升' if r.shift > 0 else '降'} {abs(r.shift)} 個半音）"),
-            "記譜調": f"1={r.tgt.jianpu}（{sig_short(r.tgt.sig)}）",
+            **({"要吹升降的音": sharps_flats} if fixed_c else {"記譜調": f"1={r.tgt.jianpu}（{sig_short(r.tgt.sig)}）"}),
             "記譜音域": f"{r.written_name(lo)} – {r.written_name(hi)}",
             "太低或太高的音": uncomfortable,
             "需移八度的音": r.moved_count,
@@ -691,10 +723,11 @@ def key_options(text: str, mode: str, src: Key, inst: Instrument, ref_octave: in
 
 
 def compare_instruments(text: str, mode: str, src: Key, ref_octave: int = 0, high_fs: bool = False,
-                        play: Key | None = None) -> list[dict]:
+                        play: Key | None = None, fixed_c: bool = False) -> list[dict]:
     rows = []
     for inst in INSTRUMENTS:
-        r = transpose(text, mode, src, inst, ref_octave, fix_single=True, high_fs=high_fs, play=play)
+        r = transpose(text, mode, src, inst, ref_octave, fix_single=True, high_fs=high_fs, play=play,
+                      fixed_c=fixed_c)
         ws = [n.written for n in r.notes]
         span = "—"
         if ws:
