@@ -157,6 +157,13 @@ R_CHORD = re.compile(r"\[([^\]\n]{1,16})\]")
 R_JIANPU = re.compile(r"(\.*)([#♯b♭]?)(\.*)([1-7])([̣̤̇̈]*)([',]*)")
 R_NAME = re.compile(r"([A-G])(##|bb|#|♯|b|♭)?(-?\d)")
 R_CHORD_PARTS = re.compile(r"^([A-G])([#♯b♭]?)(.*?)(?:/([A-G])([#♯b♭]?))?$")
+R_LYRIC_LINE = re.compile(r"[ \t]*詞[^\n]*")
+# Also drops a verse number copied from the page: 「詞：1.雖然」.
+R_LYRIC_PREFIX = re.compile(r"^\s*詞\s*\d*\s*[:：]?\s*(?:\d+\s*[.、．]\s*)?")
+# One syllable per note: "_" holds the previous syllable over an extra note; Latin words stay whole;
+# trailing punctuation (including 「……」 and "...") sticks to its syllable and never takes a note.
+_PUNCT = r"[,.!?;:，。、！？；：」』）)…‥·．\-~～]*"
+R_SYLLABLE = re.compile(r"_|[A-Za-z'’]+" + _PUNCT + r"|[^\s_,.!?;:，。、！？；：」』）)…‥·．\-~～]" + _PUNCT)
 
 
 @dataclass
@@ -171,6 +178,7 @@ class Note:
     midi: int = 0
     written: int = 0
     flag: str = ""  # "", "out", "moved"
+    lyrics: list[str] = field(default_factory=list)  # one syllable per verse ("" = none)
 
 
 @dataclass
@@ -212,6 +220,11 @@ def parse(text: str, mode: str) -> Parsed:
 
     i = 0
     while i < len(text):
+        # A lyrics line is plain text: verse numbers like 「1.雖然」 must not be read as notes.
+        if (i == 0 or text[i - 1] == "\n") and (m := R_LYRIC_LINE.match(text, i)):
+            buf.append(m[0])
+            i = m.end()
+            continue
         if m := R_KEY.match(text, i):
             flush()
             k = respell(Key(LETTERS.index(m[2]), _acc_char(m[1]) or _acc_char(m[3])))
@@ -259,6 +272,33 @@ def parse(text: str, mode: str) -> Parsed:
     return Parsed(segs, header)
 
 
+def attach_lyrics(text: str, notes: list[Note]) -> set[int]:
+    """Give each note its syllables from the 「詞：」 lines under its melody line.
+
+    Returns the line numbers of the lyrics lines that were used (a lyrics line with
+    no melody line above it is left alone and shown as plain text).
+    """
+    by_line: dict[int, list[Note]] = {}
+    for n in notes:
+        n.lyrics = []
+        by_line.setdefault(n.line, []).append(n)
+    used: set[int] = set()
+    melody: list[Note] | None = None
+    verse = 0
+    for i, raw in enumerate(text.split("\n"), 1):
+        if i in by_line:
+            melody, verse = by_line[i], 0
+        elif raw.strip().startswith("詞") and melody:
+            syllables = ["" if s == "_" else s for s in R_SYLLABLE.findall(R_LYRIC_PREFIX.sub("", raw))]
+            for n, syl in zip(melody, syllables):
+                n.lyrics += [""] * (verse - len(n.lyrics)) + [syl]
+            verse += 1
+            used.add(i)
+        elif raw.strip():
+            melody = None
+    return used
+
+
 def assign_pitches(notes: list[Note], src: Key, ref_octave: int, mode: str) -> None:
     ref = 60 + src.pc + 12 * ref_octave  # pitch of the middle "1"
     for n in notes:
@@ -299,6 +339,7 @@ class Result:
     octave: int
     auto_octave: int
     high: int
+    lyric_lines: set[int] = field(default_factory=set)
     jianpu: str = ""
     jianpu_ascii: str = ""
     names: str = ""
@@ -377,8 +418,21 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
                 n.flag = "out"
         n.written = w
 
-    res = Result(parsed, src, tgt, inst, k, auto, high)
+    res = Result(parsed, src, tgt, inst, k, auto, high, attach_lyrics(text, notes))
     uni, asc, names, html = [], [], [], []
+    line = 1
+
+    def html_text(t: str) -> None:
+        """Add plain text to the HTML view, leaving out lyrics lines (they are drawn under the notes)."""
+        nonlocal line
+        for j, part in enumerate(t.split("\n")):
+            if j:
+                if line not in res.lyric_lines:
+                    html.append("\n")
+                line += 1
+            if line not in res.lyric_lines:
+                html.append(_esc(part))
+
     has_key = any(s.kind == "key" for s in parsed.segs)
     if not has_key:
         uni.append(f"1={tgt.jianpu}\n")
@@ -388,7 +442,7 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
 
     for s in parsed.segs:
         if s.kind == "text":
-            uni.append(s.text); asc.append(s.text); names.append(s.text); html.append(_esc(s.text))
+            uni.append(s.text); asc.append(s.text); names.append(s.text); html_text(s.text)
         elif s.kind == "key":
             uni.append(f"1={tgt.jianpu}"); asc.append(f"1={tgt.jianpu_ascii}")
             names.append(f"記譜：{tgt.name} 大調")
@@ -408,7 +462,11 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
             up = f'<span class="up">{"<i></i>" * o}</span>' if o > 0 else ""
             dn = f'<span class="dn">{"<i></i>" * -o}</span>' if o < 0 else ""
             ac = f'<span class="acc">{acc_sym(n.acc)}</span>' if n.acc else ""
-            html.append(f'<span class="n {n.flag}" title="{_esc(tip)}">{ac}<span class="d">{n.deg}{up}{dn}</span></span>')
+            head = f'{ac}<span class="d">{n.deg}{up}{dn}</span>'
+            if any(n.lyrics):  # stack the syllables under the note; the column is as wide as the longest one
+                ly = "".join(f"<span>{_esc(t) or '&nbsp;'}</span>" for t in n.lyrics)
+                head = f'<span class="nh">{head}</span><span class="ly">{ly}</span>'
+            html.append(f'<span class="n {n.flag}{" lyr" if any(n.lyrics) else ""}" title="{_esc(tip)}">{head}</span>')
             res.rows.append({
                 "行": n.line, "第幾個音": n.idx,
                 "原譜": acc_sym(n.acc) + str(n.deg) + _dots(n.oct) if mode == "jianpu" else res.concert_name(n),
