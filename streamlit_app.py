@@ -137,15 +137,18 @@ def run_reader():
 with st.sidebar:
     st.header("設定", divider="orange")
     inst_id = st.segmented_control(
-        "樂器", [i.id for i in tp.INSTRUMENTS], default="soprano", required=True, key="inst",
-        format_func=lambda i: f"{tp.INSTRUMENT_BY_ID[i].name.replace('薩克斯風', '')} {tp.INSTRUMENT_BY_ID[i].tune}",
+        "樂器", [i.id for i in tp.INSTRUMENTS], default="alto", required=True, key="inst",
+        format_func=lambda i: tp.INSTRUMENT_BY_ID[i].name if i == "c"
+        else f"{tp.INSTRUMENT_BY_ID[i].name.replace('薩克斯風', '')} {tp.INSTRUMENT_BY_ID[i].tune}",
+        help="數位薩克斯風（例如 Yamaha YDS-150）：樂器的調設成 E♭ 就選中音 E♭，設成 B♭ 選高音或次中音 B♭，"
+             "設成 C 就選「YDS（C 調）」。",
         width="stretch",
     )
     inst = tp.INSTRUMENT_BY_ID[inst_id]
     fixed_c = st.segmented_control(
         "簡譜寫法", ["fixed", "movable"], default="fixed", required=True, key="notation_style", width="stretch",
         format_func={"fixed": "固定 C 指法", "movable": "首調（跟 1= 換指法）"}.get,
-        help="固定 C 指法：不管什麼調，譜都寫成 1=C，中音 1＝左手中指的 C，1̣＝低音 C，1̇＝加八度鍵的 C，"
+        help="固定 C 指法：不管什麼調，譜都寫成 1=C，點的位置照薩克斯風指法表：沒有點的 5 6 7 1＝左手三指 G、兩指 A、一指 B、中指 C（不按八度鍵），2 3 4 起按八度鍵，"
              "要升降的音直接標 ♯／♭。首調：譜寫成記譜調（例如 1=G），1 就按那個調的主音。",
     ) == "fixed"
     key_choice = st.selectbox(
@@ -154,7 +157,7 @@ with st.sidebar:
         else f"{tp.SOURCE_KEYS[i].label}　1={tp.SOURCE_KEYS[i].jianpu}",
     )
     play_choice = st.selectbox(
-        "演奏調性（移到別的調）", ["same", "auto"] + list(range(len(tp.SOURCE_KEYS))), key="play_key",
+        "演奏調性（移到別的調）", ["same", "auto"] + list(range(len(tp.SOURCE_KEYS))), key="play_key", index=1,
         format_func=lambda i: {"same": "與原曲相同", "auto": "自動推薦（這把樂器最好吹的調）"}.get(i)
         or f"{tp.SOURCE_KEYS[i].label}　1={tp.SOURCE_KEYS[i].jianpu}",
         help="整首歌移到另一個調演奏（例如配合歌手的音域，或讓旋律落在比較好吹的音區），"
@@ -302,7 +305,7 @@ with right:
             f"**原曲** 1={src.jianpu}（{src.label}）"
             + (f"→ **移到** 1={res.src.jianpu}（{'升' if res.shift > 0 else '降'} {abs(res.shift)} 個半音）"
                if res.orig else "")
-            + (f"→ **{inst.name}記譜** 1=C（固定 C 指法：中音 1＝左手中指 C，升降直接標在音上）  \n" if fixed_c
+            + (f"→ **{inst.name}記譜** 1=C（固定 C 指法：中音 5＝左手三指、中音 1＝左手中指，升降直接標在音上）  \n" if fixed_c
                else f"→ **{inst.name}記譜** 1={res.tgt.jianpu}（{res.tgt.label}，{tp.sig_long(res.tgt.sig)}）  \n")
             + f"每個音{inst.interval}；八度：{res.octave_text}{auto_note}。"
             + ("" if key_choice != "auto" or header else "  \n:orange[譜中沒有寫 1=，暫時當作 C 調。請在左側欄選擇原曲調性。]")
@@ -359,7 +362,7 @@ with right:
                 "</style>"
                 f'<div class="jp">{res.html}</div>'
             )
-            st.caption(("固定 C 指法：中音 1＝左手中指的 C，1̣＝低音 C，1̇＝加八度鍵的 C。" if fixed_c
+            st.caption(("固定 C 指法：沒有點的 5 6 7 1＝左手三指、兩指、一指、中指（不按八度鍵），2 3 4 起按八度鍵；上面加點＝高音，下面加點＝低音。" if fixed_c
                         else "簡譜八度以記譜 C4–B4 之間的 1 為中音。")
                        + "滑鼠移到音符上可看記譜音名和實音。"
                        "紅色＝超出音域，橘色＝已移八度。底線＝八分音符（兩條＝十六分），上方的 3＝三連音。")

@@ -74,6 +74,8 @@ INSTRUMENTS = [
     Instrument("alto", "中音薩克斯風", "Alto", "E♭", 9, 5, "上移大六度"),
     Instrument("tenor", "次中音薩克斯風", "Tenor", "B♭", 14, 1, "上移八度＋大二度"),
     Instrument("bari", "上低音薩克斯風", "Baritone", "E♭", 21, 5, "上移八度＋大六度"),
+    # A digital sax (e.g. Yamaha YDS-150) set to the key of C: written = concert, only the octave is chosen.
+    Instrument("c", "YDS（C 調）", "C (digital sax set to C)", "C", 0, 0, "不移調，照實音寫"),
 ]
 INSTRUMENT_BY_ID = {i.id: i for i in INSTRUMENTS}
 
@@ -491,7 +493,9 @@ class Result:
             return n.deg, n.acc, self.written_octave(n)
         letter = (self.tgt.l + n.deg - 1) % 7
         acc = wrap(n.written % 12 - NAT[letter])
-        return letter + 1, acc, (n.written - acc) // 12 - 1 - 5  # middle "1" is C5 (left middle finger)
+        # Sax fingering-chart octaves: the undotted "middle" run is 5 6 7 1 2 3 4 = written G4 … F5
+        # (G = left hand three fingers, C = left middle finger, D up with the octave key).
+        return letter + 1, acc, (n.written - acc) // 12 - 1 - (5 if letter <= 3 else 4)
     jianpu: str = ""
     jianpu_ascii: str = ""
     names: str = ""
