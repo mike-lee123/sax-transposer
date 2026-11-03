@@ -147,8 +147,9 @@ with st.sidebar:
         help="簡譜沒有絕對音高。預設把中音 1 放在中央 C（C4）到 B4 之間，適合一般人聲旋律。",
     )
     octave = st.selectbox("實際聲音的八度", list(OCTAVES), format_func=OCTAVES.get, key="octave")
-    fix_single = st.toggle("把超出音域的單音自動移八度", key="fix",
-                           help="橘色標示。比較好的做法是把那一整句一起移八度。")
+    fix_single = st.toggle("把超出音域的單音自動移八度", value=True, key="fix",
+                           help="開啟時保證每個音都在樂器音域內，被移動的音以橘色底線標示。"
+                                "常見原因是讀譜時八度點讀錯，可以對照原譜修正曲譜文字。")
     high_fs = st.toggle("我的樂器有高音 F♯ 鍵", key="high_fs")
 
     st.header("讀譜", divider="orange")
@@ -175,7 +176,6 @@ with st.sidebar:
         st.caption("免費方案有每分鐘、每天的次數限制，且依 Google 條款，資料可能被用來改進其產品。")
     else:
         st.caption("使用 Claude Opus 5.5，依用量向你的 Anthropic 帳戶收費。")
-    st.toggle("讀譜時一起抄寫歌詞", key="lyrics")
 
 # ---------- main ----------
 st.title("薩克斯風移調器")
@@ -199,6 +199,7 @@ with left:
                     else:
                         st.image(f, width=110, caption=f.name, alt=f"{f.name} 預覽")
         has_key = get_api_key(provider) is not None
+        st.toggle("一起抄寫歌詞（對齊在音符下方）", value=True, key="lyrics")
         st.button(f"用 {PROVIDERS[provider]} 讀譜", icon=":material/auto_awesome:", type="primary",
                   on_click=run_reader, disabled=not uploads or not has_key, width="stretch")
         if uploads and not has_key:
@@ -210,6 +211,9 @@ with left:
             st.success(f"已讀取{('《' + reading.title + '》') if reading.title else '曲譜'}："
                        f"{'簡譜' if reading.notation == 'jianpu' else '五線譜'}，{reading.key} 大調，"
                        f"{reading.time_signature}。請核對下方文字後再使用。", icon=":material/task_alt:")
+            if st.session_state.get("lyrics") and "詞" not in reading.text:
+                st.warning("這次沒有讀到歌詞。如果曲譜上有歌詞，請再按一次讀譜，或在下方「曲譜文字」自行加上「詞：」行。",
+                           icon=":material/lyrics:")
             if reading.notes:
                 with st.expander(f"AI 標註的不確定之處（{len(reading.notes)}）", icon=":material/help:"):
                     for n in reading.notes:
@@ -281,6 +285,9 @@ with right:
                 ".jp .moved .d{color:#d97706;text-decoration:underline 2px;text-underline-offset:4px}"
                 ".jp .ch{font-size:.58em;font-weight:700;color:#b07d2b;vertical-align:.95em;margin-right:2px}"
                 ".jp .kh{font-size:.8em;font-weight:700}"
+                ".jp .lyr{display:inline-flex;flex-direction:column;align-items:center;vertical-align:top}"
+                ".jp .ly{display:flex;flex-direction:column;align-items:center;margin:-.1em .15em .3em;"
+                "font-size:.62em;line-height:1.5;font-weight:400;white-space:nowrap}"
                 "</style>"
                 f'<div class="jp">{res.html}</div>'
             )
@@ -340,7 +347,7 @@ with right:
             cmp = pd.DataFrame(tp.compare_instruments(text, mode, src, ref_octave if mode == "jianpu" else 0, high_fs))
             st.dataframe(
                 cmp, hide_index=True,
-                column_config={"超出音域": st.column_config.NumberColumn("超出音域（個）", format="%d")},
+                column_config={"需移八度的音": st.column_config.NumberColumn("需移八度的音（個）", format="%d")},
                 alt="四種薩克斯風吹這首曲子的記譜調、八度與音域比較",
             )
             st.caption("每種樂器都已自動選擇最好吹的八度。")

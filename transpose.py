@@ -178,6 +178,7 @@ class Note:
     midi: int = 0
     written: int = 0
     flag: str = ""  # "", "out", "moved"
+    bar: int = 0  # bars are moved an octave as a whole to fit the range
     lyrics: list[str] = field(default_factory=list)  # one syllable per verse ("" = none)
 
 
@@ -211,7 +212,7 @@ def parse(text: str, mode: str) -> Parsed:
     segs: list[Seg] = []
     buf: list[str] = []
     header = None
-    line, idx = 1, 0
+    line, idx, bar = 1, 0, 0
 
     def flush():
         if buf:
@@ -249,7 +250,7 @@ def parse(text: str, mode: str) -> Parsed:
             for c in m[6]:
                 o += 1 if c == "'" else -1
             idx += 1
-            segs.append(Seg("note", note=Note(line, idx, deg=int(m[4]), acc=_acc_char(m[2]), oct=o)))
+            segs.append(Seg("note", note=Note(line, idx, deg=int(m[4]), acc=_acc_char(m[2]), oct=o, bar=bar)))
             i = m.end()
             continue
         if mode == "names" and (m := R_NAME.match(text, i)):
@@ -259,10 +260,12 @@ def parse(text: str, mode: str) -> Parsed:
             if m[2]:
                 a = 2 * _acc_char(m[2][0]) if len(m[2]) == 2 else _acc_char(m[2])
             idx += 1
-            segs.append(Seg("note", note=Note(line, idx, letter=l, letter_acc=a,
+            segs.append(Seg("note", note=Note(line, idx, letter=l, letter_acc=a, bar=bar,
                                               midi=(int(m[3]) + 1) * 12 + NAT[l] + a)))
             i = m.end()
             continue
+        if text[i] in "|\n":
+            bar += 1
         if text[i] == "\n":
             line += 1
             idx = 0
@@ -309,23 +312,63 @@ def assign_pitches(notes: list[Note], src: Key, ref_octave: int, mode: str) -> N
             n.acc = wrap(n.midi % 12 - (src.pc + NAT[n.deg - 1]) % 12)
 
 
-def score_octave(notes: list[Note], inst: Instrument, k: int, high: int) -> tuple[int, float]:
-    out, hard = 0, 0.0
-    for n in notes:
-        w = n.midi + inst.semis + 12 * k
-        if w < LOWEST or w > high:
-            out += 1
-        elif w > 84:  # above C6: palm keys
-            hard += 1
-        elif w < 61:  # bottom notes are hard to play softly
-            hard += 0.5
-    return out, out * 1000 + hard + abs(k)
+MOVE_COST = 1.0  # per note moved an octave away from the rest of the tune
+
+
+def note_cost(w: int) -> float:
+    """How awkward an in-range written pitch is: 0 from D4 up to C♯6 (octave key, no palm keys)."""
+    if w < 60:  # B♭3, B3: hard to play softly and in tune
+        return 1
+    if w < 62:  # C4, C♯4
+        return 0.5
+    if w > 85:  # D6–F♯6: palm keys
+        return 0.5
+    return 0
+
+
+def fit_range(notes: list[Note], inst: Instrument, k: int, high: int) -> tuple[list[int], list[str]]:
+    """Written pitches at octave shift k, with out-of-range bars moved an octave as a whole.
+
+    A bar that can't fit as a whole has only its out-of-range notes moved. Returns
+    (written pitches, flags) with flag "moved" for moved notes and "out" for notes that still don't fit.
+    """
+    ws = [n.midi + inst.semis + 12 * k for n in notes]
+    flags = [""] * len(notes)
+    bars: dict[int, list[int]] = {}
+    for i, n in enumerate(notes):
+        bars.setdefault(n.bar, []).append(i)
+    for idxs in bars.values():
+        if all(LOWEST <= ws[i] <= high for i in idxs):
+            continue
+        fits = [s for s in (12, -12, 24, -24) if all(LOWEST <= ws[i] + s <= high for i in idxs)]
+        if fits:
+            s = min(fits, key=lambda s: (sum(note_cost(ws[i] + s) for i in idxs), abs(s)))
+            for i in idxs:
+                ws[i] += s
+                flags[i] = "moved"
+            continue
+        for i in idxs:
+            w = ws[i]
+            while w < LOWEST:
+                w += 12
+            while w > high:
+                w -= 12
+            if w != ws[i]:
+                ws[i], flags[i] = w, "moved" if LOWEST <= w <= high else "out"
+    return ws, flags
+
+
+def score_octave(notes: list[Note], inst: Instrument, k: int, high: int) -> float:
+    ws, flags = fit_range(notes, inst, k, high)
+    return (sum(note_cost(w) for w in ws) + MOVE_COST * sum(f == "moved" for f in flags)
+            + 1000 * flags.count("out") + 0.75 * abs(k))  # stay at the original pitch unless clearly better
 
 
 def best_octave(notes: list[Note], inst: Instrument, high: int) -> int:
+    """The octave shift that needs the fewest moved notes and keeps the tune in the comfortable range."""
     if not notes:
         return 0
-    return min([0, -1, 1, -2, 2, -3], key=lambda k: score_octave(notes, inst, k, high)[1])
+    return min([0, -1, 1, -2, 2, -3], key=lambda k: score_octave(notes, inst, k, high))
 
 
 # ---------- transposition result ----------
@@ -404,19 +447,13 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
     k = auto if octave is None else octave
     tgt = target_key(src, inst)
 
-    for n in notes:
-        w = n.midi + inst.semis + 12 * k
-        n.flag = ""
-        if w < LOWEST or w > high:
-            if fix_single:
-                while w < LOWEST:
-                    w += 12
-                while w > high:
-                    w -= 12
-                n.flag = "out" if (w < LOWEST or w > high) else "moved"
-            else:
-                n.flag = "out"
-        n.written = w
+    if fix_single:
+        ws, flags = fit_range(notes, inst, k, high)
+    else:
+        ws = [n.midi + inst.semis + 12 * k for n in notes]
+        flags = ["out" if w < LOWEST or w > high else "" for w in ws]
+    for n, w, f in zip(notes, ws, flags):
+        n.written, n.flag = w, f
 
     res = Result(parsed, src, tgt, inst, k, auto, high, attach_lyrics(text, notes))
     uni, asc, names, html = [], [], [], []
@@ -483,7 +520,7 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
 def compare_instruments(text: str, mode: str, src: Key, ref_octave: int = 0, high_fs: bool = False) -> list[dict]:
     rows = []
     for inst in INSTRUMENTS:
-        r = transpose(text, mode, src, inst, ref_octave, high_fs=high_fs)
+        r = transpose(text, mode, src, inst, ref_octave, fix_single=True, high_fs=high_fs)
         ws = [n.written for n in r.notes]
         span = "—"
         if ws:
@@ -496,7 +533,7 @@ def compare_instruments(text: str, mode: str, src: Key, ref_octave: int = 0, hig
             "移調規則": inst.interval,
             "實際聲音": octave_words(r.octave),
             "記譜音域": span,
-            "超出音域": r.out_count,
+            "需移八度的音": r.moved_count,
         })
     return rows
 
