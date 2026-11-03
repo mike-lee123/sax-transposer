@@ -159,6 +159,8 @@ R_CHORD = re.compile(r"\[([^\]\n]{1,16})\]")
 R_JIANPU = re.compile(r"(\.*)([#♯b♭]?)(\.*)([1-7])([̣̤̇̈]*)([',]*)(·*)(_{0,3})")
 R_NAME = re.compile(r"([A-G])(##|bb|#|♯|b|♭)?(-?\d)(·*)(_{0,3})")
 R_REST = re.compile(r"0(·*)(_{0,3})")
+R_SLUR_JIANPU = re.compile(r"\(\s*[{.#♯b♭0-7]")
+R_SLUR_NAMES = re.compile(r"\(\s*[{0A-G]")
 R_CHORD_PARTS = re.compile(r"^([A-G])([#♯b♭]?)(.*?)(?:/([A-G])([#♯b♭]?))?$")
 R_LYRIC_LINE = re.compile(r"[ \t]*詞[^\n]*")
 # Also drops a verse number copied from the page: 「詞：1.雖然」.
@@ -189,7 +191,7 @@ class Note:
 
 @dataclass
 class Seg:
-    kind: str  # text | key | chord | note | rest
+    kind: str  # text | key | chord | note | rest | slur ("(" or ")" in text)
     text: str = ""
     key: Key | None = None
     note: Note | None = None
@@ -220,6 +222,7 @@ def parse(text: str, mode: str) -> Parsed:
     buf: list[str] = []
     header = None
     line, idx, bar = 1, 0, 0
+    slurs = 0  # open "(" slurs
 
     def flush():
         if buf:
@@ -277,6 +280,14 @@ def parse(text: str, mode: str) -> Parsed:
             flush()
             segs.append(Seg("rest", dot=len(m[1]), ul=len(m[2])))
             i = m.end()
+            continue
+        # Slur or tie: "(" right before a note, closed by the next ")". Other brackets stay text.
+        if (text[i] == "(" and (R_SLUR_JIANPU if mode == "jianpu" else R_SLUR_NAMES).match(text, i)) or (
+                text[i] == ")" and slurs):
+            flush()
+            slurs += 1 if text[i] == "(" else -1
+            segs.append(Seg("slur", text[i]))
+            i += 1
             continue
         if text[i] in "|\n":
             bar += 1
@@ -474,6 +485,7 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
     line = 1
 
     tuplets = 0  # open "{" triplet groups in the HTML
+    slurs = 0  # open "(" slurs in the HTML
 
     def html_text(t: str) -> None:
         """Add plain text to the HTML view, leaving out lyrics lines (they are drawn under the notes)
@@ -482,7 +494,8 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
         for j, part in enumerate(t.split("\n")):
             if j:
                 if line not in res.lyric_lines:
-                    html.append("\n")
+                    # a slur can't be one box across a line break: end it here, start it again below
+                    html.append("</span>" * slurs + "\n" + '<span class="sl">' * slurs)
                 line += 1
             if line in res.lyric_lines:
                 continue
@@ -516,6 +529,14 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
             uni.append(f"[{c}]"); names.append(f"[{c}]")
             asc.append(f"[{transpose_chord(s.text, src, tgt, inst, ascii_acc=True)}]")
             html.append(f'<span class="ch">{_esc(c)}</span>')
+        elif s.kind == "slur":
+            uni.append(s.text); asc.append(s.text); names.append(s.text)
+            if s.text == "(":
+                html.append('<span class="sl">')
+                slurs += 1
+            else:
+                html.append("</span>")
+                slurs -= 1
         elif s.kind == "rest":
             r = "0" + "·" * s.dot + "_" * s.ul
             uni.append(r); asc.append(r); names.append(r)
@@ -546,7 +567,7 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
                 "狀態": {"out": "超出音域", "moved": "已移八度"}.get(n.flag, "可吹"),
             })
 
-    html.append("</span>" * tuplets)  # an unclosed "{" must not swallow the rest of the page
+    html.append("</span>" * (tuplets + slurs))  # an unclosed "{" or "(" must not swallow the rest of the page
     res.jianpu, res.jianpu_ascii, res.names, res.html = "".join(uni), "".join(asc), "".join(names), "".join(html)
     return res
 

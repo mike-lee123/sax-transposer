@@ -55,6 +55,8 @@ def _tokens(res: tp.Result) -> list[list[tuple]]:
             lines[-1].append(("chord", tp.transpose_chord(s.text, res.src, res.tgt, res.inst)))
         elif s.kind == "rest":
             lines[-1].append(("rest", s))
+        elif s.kind == "slur":
+            lines[-1].append(("slur", s.text))
         else:
             lines[-1].append(("note", s.note))
     lines = [ln for i, ln in enumerate(lines, 1) if i not in res.lyric_lines]
@@ -65,7 +67,7 @@ def _tokens(res: tp.Result) -> list[list[tuple]]:
 
 def _width(tok: tuple) -> float:
     kind, v = tok
-    if kind in ("chord", "tup"):
+    if kind in ("chord", "tup", "slur"):
         return 0
     if kind == "text":
         return _text_w(v)
@@ -114,23 +116,35 @@ def _rows(line: list[tuple], width: float) -> list[list[tuple]]:
     return rows
 
 
-def _draw_row(page: pymupdf.Page, row: list[tuple], y: float, res: tp.Result) -> None:
-    """y is the digit baseline."""
+def _draw_row(page: pymupdf.Page, row: list[tuple], y: float, res: tp.Result, open_slurs: int = 0) -> int:
+    """y is the digit baseline. open_slurs: slurs carried over from the row above.
+
+    Returns the slurs still open at the end of this row.
+    """
     x = MARGIN
     chord_end = 0.0
     lyric_end: dict[int, float] = {}  # per verse, so long syllables push the next one right
-    tup_start: list[float] = []
+    tuplets: list[list] = []  # [start x, does it pass over high octave dots]
+    slurs = [[x, False] for _ in range(open_slurs)]  # same shape
     for kind, v in row:
-        if kind == "chord":
+        if kind == "slur":
+            if v == "(":
+                slurs.append([x, False])
+            elif slurs:
+                _slur(page, *slurs.pop(), x, y)
+        elif kind == "chord":
             cx = max(x, chord_end + 3)
             page.insert_text((cx, y - SIZE - 10), v, fontname=FONT, fontsize=SIZE * 0.62, color=CHORD)
             chord_end = cx + _w(v, SIZE * 0.62)
         elif kind == "tup":
             if v == "{":
-                tup_start.append(x)
-            elif tup_start:  # triplet: a small 3 centred over the group
-                mid = (tup_start.pop() + x) / 2
-                page.insert_text((mid - _w("3", 8) / 2, y - SIZE - 6.5), "3", fontname=FONT, fontsize=8)
+                tuplets.append([x, False])
+            elif tuplets:  # triplet: an arc over the group with a 3 set into its top
+                x_start, high = tuplets.pop()
+                top = _slur(page, x_start, high, x, y)
+                mid, tw = (x_start + x) / 2, _w("3", 8)
+                page.draw_rect((mid - tw / 2 - 1, top - 3, mid + tw / 2 + 1, top + 3), color=None, fill=(1, 1, 1))
+                page.insert_text((mid - tw / 2, top + 2.8), "3", fontname=FONT, fontsize=8)
         elif kind == "rest":
             x0 = x
             x += PAD
@@ -155,6 +169,9 @@ def _draw_row(page: pymupdf.Page, row: list[tuple], y: float, res: tp.Result) ->
             dw = _w(digit)
             page.insert_text((x, y), digit, fontname=FONT, fontsize=SIZE, color=color)
             o = res.written_octave(v)
+            if o > 0:
+                for s in slurs + tuplets:
+                    s[1] = True
             cx = x + dw / 2
             for i in range(abs(o)):
                 below = y + 4.5 + v.ul * UL_GAP + (1 if v.ul else 0)  # low dots go under the underlines
@@ -170,6 +187,21 @@ def _draw_row(page: pymupdf.Page, row: list[tuple], y: float, res: tp.Result) ->
                     lyric_end[i] = lx + sw
             x += dw + v.dot * _w("·") + PAD
             _underline(page, x0, x, y, v.ul, color)
+    for s in slurs:  # continues on the next row
+        _slur(page, *s, x, y)
+    return len(slurs)
+
+
+def _slur(page: pymupdf.Page, x0: float, high: bool, x1: float, y: float) -> float:
+    """A slur, tie or triplet arc over the notes between x0 and x1, raised above high octave dots.
+
+    Returns the y of the top of the arc.
+    """
+    ye = y - SIZE * 0.85 - (5 if high else 0)
+    h = min(7.0, 2.5 + (x1 - x0) * 0.05)
+    d = (x1 - x0) * 0.25
+    page.draw_bezier((x0 + 2, ye), (x0 + d, ye - h), (x1 - d, ye - h), (x1 - 2, ye), color=BLACK, width=0.8)
+    return ye - 0.75 * h  # a cubic Bézier with level control points peaks at 3/4 of their height
 
 
 def _new_page(doc: pymupdf.Document) -> pymupdf.Page:
@@ -191,6 +223,7 @@ def build_pdf(res: tp.Result, title: str = "") -> bytes:
     page.insert_text((MARGIN, y + 38), info, fontname=FONT, fontsize=9.5, color=GREY)
     y += 62
 
+    open_slurs = 0
     for row in rows:
         if not row:
             y += ROW_H * 0.4
@@ -200,7 +233,7 @@ def build_pdf(res: tp.Result, title: str = "") -> bytes:
         if y + h > PAGE_H - MARGIN:
             page = _new_page(doc)
             y = MARGIN
-        _draw_row(page, row, y + ROW_H - 22, res)
+        open_slurs = _draw_row(page, row, y + ROW_H - 22, res, open_slurs)
         y += h
 
     legend = "紅色＝超出音域　橘色＝已移八度" if res.out_count or res.moved_count else ""
