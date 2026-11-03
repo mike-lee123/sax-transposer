@@ -651,6 +651,45 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
     return res
 
 
+COMFORT_LOW, COMFORT_HIGH = 62, 81  # written D4–A5: no low pinky keys, no top-register notes
+
+
+def key_options(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int = 0,
+                high_fs: bool = False) -> list[dict]:
+    """Every key the tune could be moved to on this instrument, easiest first.
+
+    For each key the best octave is chosen. A key costs, in order of weight: notes that must be
+    moved an octave, notes outside the comfortable D4–A5 range, sharps or flats in the written
+    key signature, and how far it moves from the original key.
+    """
+    rows = []
+    for key in SOURCE_KEYS:
+        if key == Key(4, -1):  # G♭ sounds the same as F♯
+            continue
+        best = None
+        for k in (0, -1, 1, -2, 2, -3):
+            r = transpose(text, mode, src, inst, ref_octave, k, True, high_fs, key)
+            if not r.notes:
+                return []
+            uncomfortable = sum(not COMFORT_LOW <= n.written <= COMFORT_HIGH for n in r.notes)
+            score = (1000 * r.out_count + 3 * r.moved_count + uncomfortable
+                     + 2 * abs(r.tgt.sig) + 0.5 * abs(r.shift) + 0.5 * abs(k))
+            if best is None or score < best[0]:
+                best = (score, k, r, uncomfortable)
+        score, k, r, uncomfortable = best
+        lo = min(r.notes, key=lambda n: n.written)
+        hi = max(r.notes, key=lambda n: n.written)
+        rows.append({
+            "演奏調性": f"1={key.jianpu}" + ("（原調）" if key.pc == src.pc else f"（{'升' if r.shift > 0 else '降'} {abs(r.shift)} 個半音）"),
+            "記譜調": f"1={r.tgt.jianpu}（{sig_short(r.tgt.sig)}）",
+            "記譜音域": f"{r.written_name(lo)} – {r.written_name(hi)}",
+            "太低或太高的音": uncomfortable,
+            "需移八度的音": r.moved_count,
+            "key": key, "octave": k, "score": score,
+        })
+    return sorted(rows, key=lambda row: row["score"])
+
+
 def compare_instruments(text: str, mode: str, src: Key, ref_octave: int = 0, high_fs: bool = False,
                         play: Key | None = None) -> list[dict]:
     rows = []

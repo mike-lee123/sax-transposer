@@ -89,6 +89,11 @@ def cached_read(files: tuple[tuple[str, bytes], ...], include_lyrics: bool, prov
     return read_score(list(files), provider=provider, api_key=_api_key, model=model, include_lyrics=include_lyrics)
 
 
+@st.cache_data(max_entries=50, show_spinner=False)
+def cached_key_options(text: str, mode: str, src: tp.Key, inst_id: str, ref: int, high_fs: bool) -> list[dict]:
+    return tp.key_options(text, mode, src, tp.INSTRUMENT_BY_ID[inst_id], ref, high_fs)
+
+
 @st.cache_data(ttl="1h", max_entries=5, show_spinner=False)
 def gemini_models(_api_key: str | None, key_tag: str) -> tuple[list[str], str | None]:
     return list_gemini_models(_api_key)
@@ -142,11 +147,12 @@ with st.sidebar:
         else f"{tp.SOURCE_KEYS[i].label}　1={tp.SOURCE_KEYS[i].jianpu}",
     )
     play_choice = st.selectbox(
-        "演奏調性（移到別的調）", ["same"] + list(range(len(tp.SOURCE_KEYS))), key="play_key",
-        format_func=lambda i: "與原曲相同" if i == "same"
-        else f"{tp.SOURCE_KEYS[i].label}　1={tp.SOURCE_KEYS[i].jianpu}",
+        "演奏調性（移到別的調）", ["same", "auto"] + list(range(len(tp.SOURCE_KEYS))), key="play_key",
+        format_func=lambda i: {"same": "與原曲相同", "auto": "自動推薦（這把樂器最好吹的調）"}.get(i)
+        or f"{tp.SOURCE_KEYS[i].label}　1={tp.SOURCE_KEYS[i].jianpu}",
         help="整首歌移到另一個調演奏（例如配合歌手的音域，或讓旋律落在比較好吹的音區），"
-             "會往最近的方向移，最多六個半音。和弦一起移調。",
+             "會往最近的方向移，最多六個半音。和弦一起移調。"
+             "「自動推薦」會挑出全部音都在 D4–A5 好吹音區、調號最簡單的調。",
     )
     ref_octave = st.selectbox(
         "簡譜中音 1 的實際音高", [0, -1, 1], key="ref_oct",
@@ -254,7 +260,14 @@ if key_choice == "auto":
     src = header and tp.key_from_text(header.name.replace("♯", "#").replace("♭", "b")) or tp.SOURCE_KEYS[0]
 else:
     src = tp.SOURCE_KEYS[key_choice]
-play = None if play_choice == "same" else tp.SOURCE_KEYS[play_choice]
+ref = ref_octave if mode == "jianpu" else 0
+options = cached_key_options(text, mode, src, inst_id, ref, high_fs)
+if play_choice == "auto" and options:
+    play = options[0]["key"]
+    if octave is None:
+        octave = options[0]["octave"]
+else:
+    play = None if play_choice in ("same", "auto") else tp.SOURCE_KEYS[play_choice]
 res = tp.transpose(text, mode, src, inst, ref_octave if mode == "jianpu" else 0, octave, fix_single, high_fs, play)
 
 with right:
@@ -284,6 +297,24 @@ with right:
             f"每個音{inst.interval}；實際聲音{tp.octave_words(res.octave)}{auto_note}。"
             + ("" if key_choice != "auto" or header else "  \n:orange[譜中沒有寫 1=，暫時當作 C 調。請在左側欄選擇原曲調性。]")
         )
+        if options:
+            best = options[0]
+            if play_choice == "auto":
+                st.success(f"自動推薦：{best['演奏調性']}，{inst.name}記譜 {best['記譜調']}，音域 {best['記譜音域']}。",
+                           icon=":material/recommend:")
+            with st.expander(f"{inst.name}吹這首歌，各調好不好吹", icon=":material/tune:",
+                             expanded=play_choice == "auto"):
+                st.dataframe(
+                    pd.DataFrame(options).drop(columns=["key", "octave", "score"]), hide_index=True,
+                    column_config={
+                        "太低或太高的音": st.column_config.NumberColumn(
+                            help="低於 D4（要用左手小指的低音鍵）或高於 A5 的音", format="%d"),
+                        "需移八度的音": st.column_config.NumberColumn(format="%d"),
+                    },
+                    alt="這首歌移到各調時的記譜調、音域與難吹的音數，最好吹的排在最前面",
+                )
+                st.caption("由上到下越好吹：先看要不要移八度，再看太低、太高的音，再看調號的升降記號數，"
+                           "最後看離原調多遠。想用哪一個，就在左側欄「演奏調性」選它。")
 
         with st.container(border=True):
             st.subheader(f":material/music_note: {inst.name}譜", anchor=False)
