@@ -1,6 +1,8 @@
 """Render a transposed score (transpose.Result) as a printable A4 jianpu PDF."""
 from __future__ import annotations
 
+import re
+
 import pymupdf
 
 import transpose as tp
@@ -10,6 +12,8 @@ PAGE_W, PAGE_H = 595, 842  # A4 in points
 MARGIN = 50
 SIZE = 17  # note digits
 ROW_H = 58  # chord line + digits + octave dots below
+LYRIC_SIZE = 12.5
+LYRIC_H = 19  # extra height per verse of lyrics
 BLACK, GREY, CHORD = (0, 0, 0), (0.4, 0.4, 0.4), (0.69, 0.49, 0.17)
 FLAG_COLORS = {"out": (0.9, 0.28, 0.3), "moved": (0.85, 0.47, 0.02)}
 
@@ -47,6 +51,47 @@ def _tokens(res: tp.Result) -> list[list[tuple]]:
     if not any(s.kind == "key" for s in res.parsed.segs):
         lines.insert(0, [("text", f"1={res.tgt.jianpu}")])
     return lines
+
+
+LYRIC_PREFIX = re.compile(r"^\s*詞\s*\d*\s*[:：]?\s*")
+# One syllable per note: "_" holds the previous syllable over an extra note; Latin words stay whole;
+# trailing punctuation sticks to its syllable.
+SYLLABLE = re.compile(r"_|[A-Za-z'’]+[,.!?;:，。、！？；：」』）)]*|[^\s_][,.!?;:，。、！？；：」』）)]*")
+
+
+def _is_lyrics(line: list[tuple]) -> bool:
+    return bool(line) and all(k == "text" for k, _ in line) and "".join(v for _, v in line).strip().startswith("詞")
+
+
+def _syllables(line: list[tuple]) -> list[str]:
+    text = LYRIC_PREFIX.sub("", "".join(v for _, v in line))
+    return ["" if s == "_" else s for s in SYLLABLE.findall(text)]
+
+
+def _attach_lyrics(lines: list[list[tuple]]) -> tuple[list[list[tuple]], dict[int, list[str]]]:
+    """Fold each run of 「詞：」 lines into the melody line above it.
+
+    Returns the remaining lines and {id(note): [syllable per verse]}.
+    A lyrics line with no melody line above it stays as plain text.
+    """
+    kept: list[list[tuple]] = []
+    lyrics: dict[int, list[str]] = {}
+    melody: list | None = None  # notes of the last melody line
+    verse = 0
+    for line in lines:
+        if _is_lyrics(line) and melody:
+            for note, syl in zip(melody, _syllables(line)):
+                lyrics.setdefault(id(note), [])
+                lyrics[id(note)] += [""] * (verse - len(lyrics[id(note)])) + [syl]
+            verse += 1
+            continue
+        kept.append(line)
+        notes = [v for k, v in line if k == "note"]
+        if notes:
+            melody, verse = notes, 0
+        elif "".join(v for k, v in line if k == "text").strip():
+            melody = None
+    return kept, lyrics
 
 
 def _width(tok: tuple) -> float:
@@ -92,10 +137,12 @@ def _rows(line: list[tuple], width: float) -> list[list[tuple]]:
     return rows
 
 
-def _draw_row(page: pymupdf.Page, row: list[tuple], y: float, res: tp.Result) -> None:
+def _draw_row(page: pymupdf.Page, row: list[tuple], y: float, res: tp.Result,
+              lyrics: dict[int, list[str]]) -> None:
     """y is the digit baseline."""
     x = MARGIN
     chord_end = 0.0
+    lyric_end: dict[int, float] = {}  # per verse, so long syllables push the next one right
     for kind, v in row:
         if kind == "chord":
             cx = max(x, chord_end + 3)
@@ -124,6 +171,12 @@ def _draw_row(page: pymupdf.Page, row: list[tuple], y: float, res: tp.Result) ->
                 page.draw_circle((cx, cy), 1.6, color=color, fill=color)
             if v.flag == "moved":
                 page.draw_line((x, y + 2.5), (x + dw, y + 2.5), color=color, width=0.8)
+            for i, syl in enumerate(lyrics.get(id(v), [])):
+                if syl:
+                    sw = _w(syl, LYRIC_SIZE)
+                    lx = max(cx - sw / 2, lyric_end.get(i, 0) + 3)
+                    page.insert_text((lx, y + 24 + i * LYRIC_H), syl, fontname=FONT, fontsize=LYRIC_SIZE)
+                    lyric_end[i] = lx + sw
             x += dw
 
 
@@ -136,7 +189,8 @@ def _new_page(doc: pymupdf.Document) -> pymupdf.Page:
 def build_pdf(res: tp.Result, title: str = "") -> bytes:
     doc = pymupdf.open()
     width = PAGE_W - 2 * MARGIN
-    rows = [r for line in _tokens(res) for r in (_rows(line, width) or [[]])]
+    lines, lyrics = _attach_lyrics(_tokens(res))
+    rows = [r for line in lines for r in (_rows(line, width) or [[]])]
     page = _new_page(doc)
     y = MARGIN
     heading = f"{title}　{res.inst.name}譜" if title else f"{res.inst.name}譜"
@@ -150,11 +204,13 @@ def build_pdf(res: tp.Result, title: str = "") -> bytes:
         if not row:
             y += ROW_H * 0.4
             continue
-        if y + ROW_H > PAGE_H - MARGIN:
+        verses = max((len(lyrics.get(id(v), [])) for k, v in row if k == "note"), default=0)
+        h = ROW_H + verses * LYRIC_H
+        if y + h > PAGE_H - MARGIN:
             page = _new_page(doc)
             y = MARGIN
-        _draw_row(page, row, y + ROW_H - 22, res)
-        y += ROW_H
+        _draw_row(page, row, y + ROW_H - 22, res, lyrics)
+        y += h
 
     legend = "紅色＝超出音域　橘色底線＝已單獨移八度" if res.out_count or res.moved_count else ""
     for i, p in enumerate(doc):
