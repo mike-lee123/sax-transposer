@@ -159,8 +159,9 @@ R_CHORD = re.compile(r"\[([^\]\n]{1,16})\]")
 R_JIANPU = re.compile(r"(\.*)([#♯b♭]?)(\.*)([1-7])([̣̤̇̈]*)([',]*)(·*)(_{0,3})")
 R_NAME = re.compile(r"([A-G])(##|bb|#|♯|b|♭)?(-?\d)(·*)(_{0,3})")
 R_REST = re.compile(r"0(·*)(_{0,3})")
-R_SLUR_JIANPU = re.compile(r"\(\s*[{.#♯b♭0-7]")
-R_SLUR_NAMES = re.compile(r"\(\s*[{0A-G]")
+R_SLUR_JIANPU = re.compile(r"\(\s*(?:\[[^\]\n]*\]\s*)?[{.#♯b♭0-7]")
+R_SLUR_NAMES = re.compile(r"\(\s*(?:\[[^\]\n]*\]\s*)?[{0A-G]")
+R_NOTE_BEFORE = {"jianpu": re.compile(r"[0-7][̣̤̇̈',·_}\-\s|]*$"), "names": re.compile(r"[0-9][·_}\-\s|]*$")}
 R_CHORD_PARTS = re.compile(r"^([A-G])([#♯b♭]?)(.*?)(?:/([A-G])([#♯b♭]?))?$")
 R_LYRIC_LINE = re.compile(r"[ \t]*詞[^\n]*")
 # Also drops a verse number copied from the page: 「詞：1.雖然」.
@@ -217,6 +218,33 @@ def _acc_char(c: str) -> int:
     return 0
 
 
+def _slur_closes(text: str, i: int) -> bool:
+    """Whether the "(" at i has a matching ")" before the end of the next melody line."""
+    depth, breaks = 0, 0
+    for j in range(i, len(text)):
+        c = text[j]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return True
+        elif c == "\n":
+            end = text.find("\n", j + 1)
+            rest = text[j + 1:end if end >= 0 else len(text)]
+            if R_LYRIC_LINE.match(rest) or not rest.strip():
+                continue  # lyrics lines and blank lines between the two halves of a tie
+            breaks += 1
+            if breaks > 1:
+                return False
+    return False
+
+
+def _is_slur_close(text: str, i: int, mode: str) -> bool:
+    """A ")" right after a note (or its dash or bar line) closes a slur; any other ")" is text."""
+    return bool(R_NOTE_BEFORE[mode].search(text[max(0, i - 12):i]))
+
+
 def parse(text: str, mode: str) -> Parsed:
     segs: list[Seg] = []
     buf: list[str] = []
@@ -249,7 +277,10 @@ def parse(text: str, mode: str) -> Parsed:
             continue
         if m := R_CHORD.match(text, i):
             flush()
-            segs.append(Seg("chord", m[1]))
+            if segs and segs[-1].kind == "slur" and segs[-1].text == "(":  # "([G7]5 6)": chord before the arc
+                segs.insert(len(segs) - 1, Seg("chord", m[1]))
+            else:
+                segs.append(Seg("chord", m[1]))
             i = m.end()
             continue
         if mode == "jianpu" and (m := R_JIANPU.match(text, i)):
@@ -281,12 +312,28 @@ def parse(text: str, mode: str) -> Parsed:
             segs.append(Seg("rest", dot=len(m[1]), ul=len(m[2])))
             i = m.end()
             continue
-        # Slur or tie: "(" right before a note, closed by the next ")". Other brackets stay text.
-        if (text[i] == "(" and (R_SLUR_JIANPU if mode == "jianpu" else R_SLUR_NAMES).match(text, i)) or (
-                text[i] == ")" and slurs):
-            flush()
-            slurs += 1 if text[i] == "(" else -1
-            segs.append(Seg("slur", text[i]))
+        # Legato slur or tie: "(" right before a note with its ")" on this line or the next melody line.
+        # An unmatched bracket is dropped rather than drawn as an arc running on to the end of the score.
+        if text[i] == "(" and (R_SLUR_JIANPU if mode == "jianpu" else R_SLUR_NAMES).match(text, i):
+            j = i + 1
+            while j < len(text) and text[j] in " \t":  # the arc starts at the first note: spaces go before it
+                j += 1
+            buf.append(text[i + 1:j])
+            if _slur_closes(text, i):
+                flush()
+                slurs += 1
+                segs.append(Seg("slur", "("))
+            i = j
+            continue
+        if text[i] == ")" and _is_slur_close(text, i, mode):
+            if slurs:  # the arc ends at the last note: spaces before ")" go after it
+                pending = "".join(buf)
+                core = pending.rstrip(" \t")
+                buf[:] = [core] if core else []
+                flush()
+                slurs -= 1
+                segs.append(Seg("slur", ")"))
+                buf.append(pending[len(core):])
             i += 1
             continue
         if text[i] in "|\n":
