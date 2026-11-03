@@ -4,6 +4,8 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
+import time
 from dataclasses import dataclass
 
 import anthropic
@@ -15,6 +17,8 @@ from PIL import Image
 CLAUDE_MODEL = "claude-opus-5-5"
 # Used when the model list can't be fetched. Google keeps these aliases pointed at its current models.
 GEMINI_DEFAULT_MODELS = ["gemini-flash-latest", "gemini-pro-latest"]
+MAX_GEMINI_MODELS = 3  # models to try before giving up (each has its own free-tier quota)
+MAX_QUOTA_WAIT = 60  # seconds; wait out a per-minute quota instead of switching models
 MAX_IMAGE_SIDE = 2400  # long-side pixels; keeps each image well under the API size limits
 
 PROMPT = """這是一份曲譜（{n} 個檔案，依上傳順序排列）。請把旋律完整、精確地抄寫成文字，供移調程式使用。
@@ -34,12 +38,19 @@ text 的格式規則：
   - 低八度在數字前加英文句點，一個點一個「.」：低音 6 寫 .6，倍低音 5 寫 ..5。
   - 高八度在數字後加撇號：高音 1 寫 1'，倍高音 3 寫 3''。
   - 升降記號寫在數字前：#4、b7。
-  - 延長線寫 -，小節線寫 |，附點寫 ·（不要用英文句點表示附點）。
-  - 八分音符、十六分音符的底線可以省略，音與音之間用空格分開。
+  - 延長線寫 -，小節線寫 |，附點寫 ·（不要用英文句點表示附點），緊接在數字（和八度記號）後面：5·。
+- 節奏（一定要抄，不可省略）：
+  - 數字下有一條底線（八分音符）在後面加一個 _，兩條底線（十六分音符）加兩個 _：5_、6__。
+  - 附點加底線時，附點在前：5·_ 6__。休止符也一樣：0_、0__。
+  - 同一拍、底線連在一起的音要寫在一起、中間不留空格，拍與拍之間才用空格：0_1_2_3_ 5 5_6_、5·_3__ 5 -。
+  - 三連音（上方標 3）用大括號包起來：{{3'_2'_3'_}}。
+  - 沒有底線的音（四分音符以上）照常用空格分開。
 - 五線譜：
   - 每個音寫成音名＋升降＋八度數字，中央 C 是 C4：C4、Eb4、F#5、Bb3。
   - 把調號套用到每個音上（例如 E♭ 大調裡的 B 要寫成 Bb）。
-  - 小節線寫 |，休止符寫 0，音之間用空格分開。
+  - 小節線寫 |，休止符寫 0。
+  - 節奏用同樣的寫法：四分音符不加記號，二分音符後面加 -（C4 -），八分音符加 _，十六分音符加 __，附點加 ·，
+    同一拍的音寫在一起不留空格：C4_D4_ E4 G4·_A4__，三連音用大括號：{{C5_D5_E5_}}。
 - 和弦代號放在方括號，放在它開始的那個音前面：[Cm]、[G7]、[F/A]。
 - 有反覆記號、D.S.、Coda 時，照譜面順序抄寫，不要展開，並在 notes 裡說明。
 - {lyrics}
@@ -166,29 +177,43 @@ def _read_gemini(files, api_key, model, include_lyrics) -> ScoreReading:
     parts.append(_prompt(len(files), include_lyrics))
 
     notes = []
+    tried: list[str] = []
+    waited = False
     try:
         client = _gemini_client(api_key)
-        try:
-            response = _generate(client, model, parts)
-        except (genai_errors.ClientError, genai_errors.ServerError) as e:
-            # Retired model (404) or a model still overloaded after the client's retries (5xx):
-            # try once more with another stable model of the same family (flash/pro) the account can use.
-            if not (e.code == 404 or isinstance(e, genai_errors.ServerError)):
-                raise
-            available = [m for m in _fetch_gemini_models(client) if m != model]
-            if not available:
-                raise
-            family = "pro" if "pro" in model else "flash"
-            alt = next((m for m in available if family in m and "preview" not in m), available[0])
-            why = "已停用" if e.code == 404 else f"目前忙碌（{e.code}）"
-            notes.append(f"模型 {model} {why}，這次改用 {alt} 讀譜。")
-            model = alt
-            response = _generate(client, model, parts)
+        while True:
+            try:
+                response = _generate(client, model, parts)
+                break
+            except (genai_errors.ClientError, genai_errors.ServerError) as e:
+                # Retired model (404), used-up quota (429) or a model still overloaded after the client's
+                # retries (5xx): switch to another model the account can use. A short per-minute quota
+                # is waited out once instead.
+                if e.code == 429:
+                    daily, delay = _quota_info(e)
+                    if not daily and delay is not None and delay <= MAX_QUOTA_WAIT and not waited:
+                        waited = True
+                        time.sleep(delay + 1)
+                        continue
+                elif not (e.code == 404 or isinstance(e, genai_errors.ServerError)):
+                    raise
+                tried.append(model)
+                alt = _next_gemini_model(client, model, tried) if len(tried) < MAX_GEMINI_MODELS else None
+                if alt is None:
+                    raise
+                why = {404: "已停用", 429: "的免費額度已用完"}.get(e.code, f"目前忙碌（{e.code}）")
+                notes.append(f"模型 {model} {why}，這次改用 {alt} 讀譜。")
+                model = alt
     except genai_errors.ClientError as e:
         if e.code in (400, 401, 403) and "API key" in str(e):
             raise ScoreReadError("Gemini API key 無效，請確認金鑰。") from e
         if e.code == 429:
-            raise ScoreReadError("Gemini 使用量已達上限（免費方案有每分鐘、每天的次數限制），請稍後再試。") from e
+            models = "、".join(tried or [model])
+            if _quota_info(e)[0]:
+                raise ScoreReadError(
+                    f"Gemini 今天的免費額度已用完（已試過 {models}）。額度每天在美國太平洋時間午夜重置"
+                    "（台灣時間下午 3–4 點）；在那之前可以改用 Claude 讀譜。") from e
+            raise ScoreReadError(f"Gemini 每分鐘的免費次數已達上限（已試過 {models}），請等一兩分鐘再試。") from e
         if e.code == 404:
             raise ScoreReadError(f"找不到模型 {model}，請換一個 Gemini 模型。") from e
         raise ScoreReadError(f"Gemini 無法處理這份檔案（{e.code}）：{getattr(e, 'message', '') or e}") from e
@@ -215,6 +240,25 @@ def _gemini_client(api_key: str | None) -> genai.Client:
                                          http_status_codes=[500, 502, 503, 504])
     http = genai_types.HttpOptions(retry_options=retry)
     return genai.Client(api_key=api_key, http_options=http) if api_key else genai.Client(http_options=http)
+
+
+def _quota_info(e: genai_errors.APIError) -> tuple[bool, float | None]:
+    """(is it a daily or zero quota, seconds Google asks us to wait) from a 429 error."""
+    details = str(getattr(e, "details", "")) + str(e)
+    daily = "PerDay" in details or re.search(r"limit:\s*0\b", details) is not None
+    m = re.search(r"retryDelay['\"]?\s*:\s*['\"]?(\d+(?:\.\d+)?)s", details)
+    return daily, float(m[1]) if m else None
+
+
+def _next_gemini_model(client: genai.Client, model: str, tried: list[str]) -> str | None:
+    """Another stable model of the same family (flash/pro) if possible, else any other usable model."""
+    try:
+        available = [m for m in _fetch_gemini_models(client) if m not in tried]
+    except genai_errors.APIError:
+        return None
+    family = "pro" if "pro" in model else "flash"
+    stable = [m for m in available if "preview" not in m and "exp" not in m]
+    return next((m for m in stable if family in m), None) or next(iter(stable), None) or next(iter(available), None)
 
 
 def _generate(client: genai.Client, model: str, parts: list):

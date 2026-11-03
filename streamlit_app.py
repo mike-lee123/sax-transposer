@@ -148,7 +148,7 @@ with st.sidebar:
     )
     octave = st.selectbox("實際聲音的八度", list(OCTAVES), format_func=OCTAVES.get, key="octave")
     fix_single = st.toggle("把超出音域的單音自動移八度", value=True, key="fix",
-                           help="開啟時保證每個音都在樂器音域內，被移動的音以橘色底線標示。"
+                           help="開啟時保證每個音都在樂器音域內，被移動的音以橘色標示。"
                                 "常見原因是讀譜時八度點讀錯，可以對照原譜修正曲譜文字。")
     high_fs = st.toggle("我的樂器有高音 F♯ 鍵", key="high_fs")
 
@@ -232,6 +232,8 @@ with left:
                 "- 低音：`.6` 或 `6̣`；高音：`6'` 或 `6̇`；升降：`#4`、`b7`\n"
                 "- 音名格式：`C4`（中央 C）、`Eb4`、`F#5`\n"
                 "- 和弦放在方括號：`[Cm]`、`[G7]`、`[F/A]`，會一起移調\n"
+                "- 節奏：八分音符 `5_`，十六分音符 `5__`，附點 `5·`（附點八分 `5·_`），休止符同樣 `0_`。"
+                "同一拍的音連著寫、不留空格，底線就會連成一條：`0_1_2_3_`、`5·_3__`。三連音用大括號：`{3'_2'_3'_}`\n"
                 "- 歌詞：寫在旋律行的下一行，行首加 `詞：`，一個音一個字、用空格分開；"
                 "一個字唱多個音時，多出的音寫 `_`。第二段歌詞再寫一行 `詞：`。PDF 會把字對齊在音符下方\n"
                 "- `0`、`-`、`|`、附點 `·` 等其他文字原樣保留。附點請用 `·`，`5.6` 會被讀成「5 和低音 6」"
@@ -276,13 +278,21 @@ with right:
             st.html(
                 "<style>"
                 ".jp{font-size:22px;line-height:2.7;white-space:pre-wrap;word-break:break-word;font-variant-numeric:tabular-nums}"
-                ".jp .n{display:inline-block}.jp .acc{font-size:.6em;vertical-align:.55em;margin-right:1px}"
+                ".jp .n{display:inline-block;position:relative;padding:0 .1em}.jp .acc{font-size:.6em;vertical-align:.55em;margin-right:1px}"
                 ".jp .d{position:relative;display:inline-block}"
                 ".jp .up,.jp .dn{position:absolute;left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:2px}"
                 ".jp .up{bottom:calc(100% - .55em)}.jp .dn{top:calc(100% - .5em)}"
                 ".jp i{display:block;width:4px;height:4px;border-radius:50%;background:currentColor}"
                 ".jp .out .d{color:#e5484d;background:rgba(229,72,77,.15);border-radius:4px;padding:0 2px}"
-                ".jp .moved .d{color:#d97706;text-decoration:underline 2px;text-underline-offset:4px}"
+                ".jp .moved .d{color:#d97706}"
+                # rhythm: underlines of neighbouring notes touch, so a beat written without spaces is one beam
+                ".jp .u1::after,.jp .u2::after,.jp .u3::after,.jp .u2::before,.jp .u3::before{content:'';position:absolute;"
+                "left:0;right:0;border-top:.08em solid currentColor}"
+                ".jp .n::after{top:1.86em}.jp .n::before{top:2.04em}"
+                ".jp .u1 .dn{top:calc(100% - .3em)}.jp .u2 .dn,.jp .u3 .dn{top:calc(100% - .12em)}"
+                ".jp .tup{position:relative;display:inline-block}"
+                ".jp .tup::before{content:'3';position:absolute;left:50%;top:-.12em;transform:translateX(-50%);"
+                "font-size:.5em;line-height:1;font-style:italic;font-weight:700}"
                 ".jp .ch{font-size:.58em;font-weight:700;color:#b07d2b;vertical-align:.95em;margin-right:2px}"
                 ".jp .kh{font-size:.8em;font-weight:700}"
                 ".jp .lyr{display:inline-flex;flex-direction:column;align-items:center;vertical-align:top}"
@@ -292,7 +302,7 @@ with right:
                 f'<div class="jp">{res.html}</div>'
             )
             st.caption("簡譜八度以記譜 C4–B4 之間的 1 為中音。滑鼠移到音符上可看記譜音名和實音。"
-                       "紅色＝超出音域，橘色底線＝已單獨移八度。")
+                       "紅色＝超出音域，橘色＝已移八度。底線＝八分音符（兩條＝十六分），上方的 3＝三連音。")
             t1, t2, t3 = st.tabs(["簡譜（點號）", "簡譜（純文字）", "記譜音名"])
             t1.code(res.jianpu, language=None, wrap_lines=True)
             t2.code(res.jianpu_ascii, language=None, wrap_lines=True)

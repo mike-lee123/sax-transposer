@@ -25,6 +25,8 @@ def _w(text: str, size: float = SIZE) -> float:
 
 
 SPACE = SIZE * 0.6  # wider than the font's space so notes are easy to read
+PAD = 1.6  # each side of a note or rest; underlines run through it so a beat reads as one beam
+UL_Y, UL_GAP = 3.2, 2.8  # first underline below the baseline, distance to the next
 
 
 def _text_w(text: str) -> float:
@@ -32,75 +34,50 @@ def _text_w(text: str) -> float:
 
 
 def _tokens(res: tp.Result) -> list[list[tuple]]:
-    """Split the score into source lines of (kind, value) tokens; text is cut after every bar line."""
+    """Split the score into source lines of (kind, value) tokens; text is cut after every bar line.
+
+    Lyrics lines that belong to a melody line are dropped: their syllables are drawn under the notes.
+    """
     lines: list[list[tuple]] = [[]]
     for s in res.parsed.segs:
         if s.kind == "text":
             for i, part in enumerate(s.text.split("\n")):
                 if i:
                     lines.append([])
-                for piece in part.replace("|", "|\0").split("\0"):
-                    if piece:
+                for piece in re.split(r"(?<=\|)|([{}])", part):
+                    if piece in ("{", "}"):
+                        lines[-1].append(("tup", piece))
+                    elif piece:
                         lines[-1].append(("text", piece))
         elif s.kind == "key":
             lines[-1].append(("text", f"1={res.tgt.jianpu}"))
         elif s.kind == "chord":
             lines[-1].append(("chord", tp.transpose_chord(s.text, res.src, res.tgt, res.inst)))
+        elif s.kind == "rest":
+            lines[-1].append(("rest", s))
         else:
             lines[-1].append(("note", s.note))
+    lines = [ln for i, ln in enumerate(lines, 1) if i not in res.lyric_lines]
     if not any(s.kind == "key" for s in res.parsed.segs):
         lines.insert(0, [("text", f"1={res.tgt.jianpu}")])
     return lines
 
 
-LYRIC_PREFIX = re.compile(r"^\s*詞\s*\d*\s*[:：]?\s*")
-# One syllable per note: "_" holds the previous syllable over an extra note; Latin words stay whole;
-# trailing punctuation sticks to its syllable.
-SYLLABLE = re.compile(r"_|[A-Za-z'’]+[,.!?;:，。、！？；：」』）)]*|[^\s_][,.!?;:，。、！？；：」』）)]*")
-
-
-def _is_lyrics(line: list[tuple]) -> bool:
-    return bool(line) and all(k == "text" for k, _ in line) and "".join(v for _, v in line).strip().startswith("詞")
-
-
-def _syllables(line: list[tuple]) -> list[str]:
-    text = LYRIC_PREFIX.sub("", "".join(v for _, v in line))
-    return ["" if s == "_" else s for s in SYLLABLE.findall(text)]
-
-
-def _attach_lyrics(lines: list[list[tuple]]) -> tuple[list[list[tuple]], dict[int, list[str]]]:
-    """Fold each run of 「詞：」 lines into the melody line above it.
-
-    Returns the remaining lines and {id(note): [syllable per verse]}.
-    A lyrics line with no melody line above it stays as plain text.
-    """
-    kept: list[list[tuple]] = []
-    lyrics: dict[int, list[str]] = {}
-    melody: list | None = None  # notes of the last melody line
-    verse = 0
-    for line in lines:
-        if _is_lyrics(line) and melody:
-            for note, syl in zip(melody, _syllables(line)):
-                lyrics.setdefault(id(note), [])
-                lyrics[id(note)] += [""] * (verse - len(lyrics[id(note)])) + [syl]
-            verse += 1
-            continue
-        kept.append(line)
-        notes = [v for k, v in line if k == "note"]
-        if notes:
-            melody, verse = notes, 0
-        elif "".join(v for k, v in line if k == "text").strip():
-            melody = None
-    return kept, lyrics
-
-
 def _width(tok: tuple) -> float:
     kind, v = tok
-    if kind == "chord":
+    if kind in ("chord", "tup"):
         return 0
     if kind == "text":
         return _text_w(v)
-    return _w(str(v.deg)) + (_w(tp.acc_sym(v.acc), SIZE * 0.6) if v.acc else 0)
+    if kind == "rest":
+        return 2 * PAD + _w("0") + v.dot * _w("·")
+    return 2 * PAD + _w(str(v.deg)) + v.dot * _w("·") + (_w(tp.acc_sym(v.acc), SIZE * 0.6) if v.acc else 0)
+
+
+def _underline(page: pymupdf.Page, x0: float, x1: float, y: float, n: int, color) -> None:
+    for i in range(n):
+        yy = y + UL_Y + i * UL_GAP
+        page.draw_line((x0, yy), (x1, yy), color=color, width=0.9)
 
 
 def _measures(line: list[tuple]) -> list[list[tuple]]:
@@ -137,17 +114,29 @@ def _rows(line: list[tuple], width: float) -> list[list[tuple]]:
     return rows
 
 
-def _draw_row(page: pymupdf.Page, row: list[tuple], y: float, res: tp.Result,
-              lyrics: dict[int, list[str]]) -> None:
+def _draw_row(page: pymupdf.Page, row: list[tuple], y: float, res: tp.Result) -> None:
     """y is the digit baseline."""
     x = MARGIN
     chord_end = 0.0
     lyric_end: dict[int, float] = {}  # per verse, so long syllables push the next one right
+    tup_start: list[float] = []
     for kind, v in row:
         if kind == "chord":
             cx = max(x, chord_end + 3)
-            page.insert_text((cx, y - SIZE - 4), v, fontname=FONT, fontsize=SIZE * 0.62, color=CHORD)
+            page.insert_text((cx, y - SIZE - 10), v, fontname=FONT, fontsize=SIZE * 0.62, color=CHORD)
             chord_end = cx + _w(v, SIZE * 0.62)
+        elif kind == "tup":
+            if v == "{":
+                tup_start.append(x)
+            elif tup_start:  # triplet: a small 3 centred over the group
+                mid = (tup_start.pop() + x) / 2
+                page.insert_text((mid - _w("3", 8) / 2, y - SIZE - 6.5), "3", fontname=FONT, fontsize=8)
+        elif kind == "rest":
+            x0 = x
+            x += PAD
+            page.insert_text((x, y), "0" + "·" * v.dot, fontname=FONT, fontsize=SIZE)
+            x += _w("0") + v.dot * _w("·") + PAD
+            _underline(page, x0, x, y, v.ul, BLACK)
         elif kind == "text":
             color = GREY if v.strip().startswith("詞") else BLACK
             for c in v:
@@ -156,6 +145,8 @@ def _draw_row(page: pymupdf.Page, row: list[tuple], y: float, res: tp.Result,
                 x += SPACE if c == " " else _w(c)
         else:
             color = FLAG_COLORS.get(v.flag, BLACK)
+            x0 = x
+            x += PAD
             if v.acc:
                 acc = tp.acc_sym(v.acc)
                 page.insert_text((x, y - SIZE * 0.4), acc, fontname=FONT, fontsize=SIZE * 0.6, color=color)
@@ -166,18 +157,19 @@ def _draw_row(page: pymupdf.Page, row: list[tuple], y: float, res: tp.Result,
             o = res.written_octave(v)
             cx = x + dw / 2
             for i in range(abs(o)):
-                below = y + (7 if v.flag == "moved" else 4.5)  # keep clear of the underline
+                below = y + 4.5 + v.ul * UL_GAP + (1 if v.ul else 0)  # low dots go under the underlines
                 cy = y - SIZE * 0.8 - 2.5 - i * 4.5 if o > 0 else below + i * 4.5
                 page.draw_circle((cx, cy), 1.6, color=color, fill=color)
-            if v.flag == "moved":
-                page.draw_line((x, y + 2.5), (x + dw, y + 2.5), color=color, width=0.8)
-            for i, syl in enumerate(lyrics.get(id(v), [])):
+            if v.dot:
+                page.insert_text((x + dw, y), "·" * v.dot, fontname=FONT, fontsize=SIZE, color=color)
+            for i, syl in enumerate(v.lyrics):
                 if syl:
                     sw = _w(syl, LYRIC_SIZE)
                     lx = max(cx - sw / 2, lyric_end.get(i, 0) + 3)
                     page.insert_text((lx, y + 24 + i * LYRIC_H), syl, fontname=FONT, fontsize=LYRIC_SIZE)
                     lyric_end[i] = lx + sw
-            x += dw
+            x += dw + v.dot * _w("·") + PAD
+            _underline(page, x0, x, y, v.ul, color)
 
 
 def _new_page(doc: pymupdf.Document) -> pymupdf.Page:
@@ -189,8 +181,7 @@ def _new_page(doc: pymupdf.Document) -> pymupdf.Page:
 def build_pdf(res: tp.Result, title: str = "") -> bytes:
     doc = pymupdf.open()
     width = PAGE_W - 2 * MARGIN
-    lines, lyrics = _attach_lyrics(_tokens(res))
-    rows = [r for line in lines for r in (_rows(line, width) or [[]])]
+    rows = [r for line in _tokens(res) for r in (_rows(line, width) or [[]])]
     page = _new_page(doc)
     y = MARGIN
     heading = f"{title}　{res.inst.name}譜" if title else f"{res.inst.name}譜"
@@ -204,15 +195,15 @@ def build_pdf(res: tp.Result, title: str = "") -> bytes:
         if not row:
             y += ROW_H * 0.4
             continue
-        verses = max((len(lyrics.get(id(v), [])) for k, v in row if k == "note"), default=0)
+        verses = max((len(v.lyrics) for k, v in row if k == "note"), default=0)
         h = ROW_H + verses * LYRIC_H
         if y + h > PAGE_H - MARGIN:
             page = _new_page(doc)
             y = MARGIN
-        _draw_row(page, row, y + ROW_H - 22, res, lyrics)
+        _draw_row(page, row, y + ROW_H - 22, res)
         y += h
 
-    legend = "紅色＝超出音域　橘色底線＝已單獨移八度" if res.out_count or res.moved_count else ""
+    legend = "紅色＝超出音域　橘色＝已移八度" if res.out_count or res.moved_count else ""
     for i, p in enumerate(doc):
         footer = f"{i + 1} / {doc.page_count}"
         p.insert_text((PAGE_W - MARGIN - _w(footer, 9), PAGE_H - 28), footer, fontname=FONT, fontsize=9, color=GREY)

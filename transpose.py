@@ -154,8 +154,11 @@ def octave_words(k: int) -> str:
 R_KEY = re.compile(r"1\s*=\s*([#♯b♭]?)([A-G])([#♯b♭]?)")
 R_TIME = re.compile(r"\d+\s*/\s*\d+")
 R_CHORD = re.compile(r"\[([^\]\n]{1,16})\]")
-R_JIANPU = re.compile(r"(\.*)([#♯b♭]?)(\.*)([1-7])([̣̤̇̈]*)([',]*)")
-R_NAME = re.compile(r"([A-G])(##|bb|#|♯|b|♭)?(-?\d)")
+# Rhythm suffixes: "·" augmentation dot, "_" one underline (eighth), "__" two (sixteenth).
+# Notes of one beat are written without spaces ("5·_6__") so their underlines join.
+R_JIANPU = re.compile(r"(\.*)([#♯b♭]?)(\.*)([1-7])([̣̤̇̈]*)([',]*)(·*)(_{0,3})")
+R_NAME = re.compile(r"([A-G])(##|bb|#|♯|b|♭)?(-?\d)(·*)(_{0,3})")
+R_REST = re.compile(r"0(·*)(_{0,3})")
 R_CHORD_PARTS = re.compile(r"^([A-G])([#♯b♭]?)(.*?)(?:/([A-G])([#♯b♭]?))?$")
 R_LYRIC_LINE = re.compile(r"[ \t]*詞[^\n]*")
 # Also drops a verse number copied from the page: 「詞：1.雖然」.
@@ -179,15 +182,19 @@ class Note:
     written: int = 0
     flag: str = ""  # "", "out", "moved"
     bar: int = 0  # bars are moved an octave as a whole to fit the range
+    dot: int = 0  # augmentation dots "·"
+    ul: int = 0  # underlines: 1 eighth, 2 sixteenth
     lyrics: list[str] = field(default_factory=list)  # one syllable per verse ("" = none)
 
 
 @dataclass
 class Seg:
-    kind: str  # text | key | chord | note
+    kind: str  # text | key | chord | note | rest
     text: str = ""
     key: Key | None = None
     note: Note | None = None
+    dot: int = 0  # rest only
+    ul: int = 0  # rest only
 
 
 @dataclass
@@ -250,7 +257,8 @@ def parse(text: str, mode: str) -> Parsed:
             for c in m[6]:
                 o += 1 if c == "'" else -1
             idx += 1
-            segs.append(Seg("note", note=Note(line, idx, deg=int(m[4]), acc=_acc_char(m[2]), oct=o, bar=bar)))
+            segs.append(Seg("note", note=Note(line, idx, deg=int(m[4]), acc=_acc_char(m[2]), oct=o, bar=bar,
+                                              dot=len(m[7]), ul=len(m[8]))))
             i = m.end()
             continue
         if mode == "names" and (m := R_NAME.match(text, i)):
@@ -261,7 +269,13 @@ def parse(text: str, mode: str) -> Parsed:
                 a = 2 * _acc_char(m[2][0]) if len(m[2]) == 2 else _acc_char(m[2])
             idx += 1
             segs.append(Seg("note", note=Note(line, idx, letter=l, letter_acc=a, bar=bar,
-                                              midi=(int(m[3]) + 1) * 12 + NAT[l] + a)))
+                                              midi=(int(m[3]) + 1) * 12 + NAT[l] + a,
+                                              dot=len(m[4]), ul=len(m[5]))))
+            i = m.end()
+            continue
+        if m := R_REST.match(text, i):
+            flush()
+            segs.append(Seg("rest", dot=len(m[1]), ul=len(m[2])))
             i = m.end()
             continue
         if text[i] in "|\n":
@@ -459,16 +473,29 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
     uni, asc, names, html = [], [], [], []
     line = 1
 
+    tuplets = 0  # open "{" triplet groups in the HTML
+
     def html_text(t: str) -> None:
-        """Add plain text to the HTML view, leaving out lyrics lines (they are drawn under the notes)."""
-        nonlocal line
+        """Add plain text to the HTML view, leaving out lyrics lines (they are drawn under the notes)
+        and turning "{…}" into a triplet group."""
+        nonlocal line, tuplets
         for j, part in enumerate(t.split("\n")):
             if j:
                 if line not in res.lyric_lines:
                     html.append("\n")
                 line += 1
-            if line not in res.lyric_lines:
-                html.append(_esc(part))
+            if line in res.lyric_lines:
+                continue
+            for piece in re.split(r"([{}])", part):
+                if piece == "{":
+                    html.append('<span class="tup">')
+                    tuplets += 1
+                elif piece == "}":
+                    if tuplets:
+                        html.append("</span>")
+                        tuplets -= 1
+                elif piece:
+                    html.append(_esc(piece))
 
     has_key = any(s.kind == "key" for s in parsed.segs)
     if not has_key:
@@ -489,21 +516,27 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
             uni.append(f"[{c}]"); names.append(f"[{c}]")
             asc.append(f"[{transpose_chord(s.text, src, tgt, inst, ascii_acc=True)}]")
             html.append(f'<span class="ch">{_esc(c)}</span>')
+        elif s.kind == "rest":
+            r = "0" + "·" * s.dot + "_" * s.ul
+            uni.append(r); asc.append(r); names.append(r)
+            html.append(f'<span class="n r u{s.ul}"><span class="d">0</span>{"·" * s.dot}</span>')
         else:
             n = s.note
             o = res.written_octave(n)
-            uni.append(acc_sym(n.acc) + str(n.deg) + _dots(o))
-            asc.append(acc_ascii(n.acc) + "." * max(0, -o) + str(n.deg) + "'" * max(0, o))
-            names.append(spell(n.written, (tgt.l + n.deg - 1) % 7, ascii_acc=True))
+            rhythm = "·" * n.dot + "_" * n.ul
+            uni.append(acc_sym(n.acc) + str(n.deg) + _dots(o) + rhythm)
+            asc.append(acc_ascii(n.acc) + "." * max(0, -o) + str(n.deg) + "'" * max(0, o) + rhythm)
+            names.append(spell(n.written, (tgt.l + n.deg - 1) % 7, ascii_acc=True) + rhythm)
             tip = f"記譜 {res.written_name(n)} · 實音 {res.concert_name(n)}"
             up = f'<span class="up">{"<i></i>" * o}</span>' if o > 0 else ""
             dn = f'<span class="dn">{"<i></i>" * -o}</span>' if o < 0 else ""
             ac = f'<span class="acc">{acc_sym(n.acc)}</span>' if n.acc else ""
-            head = f'{ac}<span class="d">{n.deg}{up}{dn}</span>'
+            head = f'{ac}<span class="d">{n.deg}{up}{dn}</span>{"·" * n.dot}'
             if any(n.lyrics):  # stack the syllables under the note; the column is as wide as the longest one
                 ly = "".join(f"<span>{_esc(t) or '&nbsp;'}</span>" for t in n.lyrics)
                 head = f'<span class="nh">{head}</span><span class="ly">{ly}</span>'
-            html.append(f'<span class="n {n.flag}{" lyr" if any(n.lyrics) else ""}" title="{_esc(tip)}">{head}</span>')
+            cls = f'n {n.flag} u{n.ul}{" lyr" if any(n.lyrics) else ""}'
+            html.append(f'<span class="{cls}" title="{_esc(tip)}">{head}</span>')
             res.rows.append({
                 "行": n.line, "第幾個音": n.idx,
                 "原譜": acc_sym(n.acc) + str(n.deg) + _dots(n.oct) if mode == "jianpu" else res.concert_name(n),
@@ -513,6 +546,7 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
                 "狀態": {"out": "超出音域", "moved": "已移八度"}.get(n.flag, "可吹"),
             })
 
+    html.append("</span>" * tuplets)  # an unclosed "{" must not swallow the rest of the page
     res.jianpu, res.jianpu_ascii, res.names, res.html = "".join(uni), "".join(asc), "".join(names), "".join(html)
     return res
 
