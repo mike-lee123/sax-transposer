@@ -384,7 +384,7 @@ with right:
             with st.container(horizontal=True):
                 st.download_button(
                     "下載 PDF 曲譜", icon=":material/picture_as_pdf:", type="primary",
-                    data=build_pdf(res, title), file_name=f"sax-{inst.id}-1={res.key_label_ascii}.pdf",
+                    data=lambda: build_pdf(res, title), file_name=f"sax-{inst.id}-1={res.key_label_ascii}.pdf",
                     mime="application/pdf",
                 )
                 st.download_button(
