@@ -8,7 +8,7 @@ import streamlit as st
 
 import transpose as tp
 from score_pdf import build_pdf
-from score_reader import ScoreReadError, list_gemini_models, read_score
+from score_reader import ScoreReadError, read_score
 
 st.set_page_config(page_title="薩克斯風移調器", page_icon=":material/music_note:", layout="wide")
 
@@ -68,36 +68,26 @@ if "score_text" not in st.session_state:
     st.session_state.read_error = None
 
 
-PROVIDERS = {"claude": "Claude", "gemini": "Gemini"}
-KEY_NAMES = {"claude": ["ANTHROPIC_API_KEY"], "gemini": ["GEMINI_API_KEY", "GOOGLE_API_KEY"]}
+KEY_NAME = "ANTHROPIC_API_KEY"
 
 
-def get_api_key(provider: str) -> str | None:
-    for name in KEY_NAMES[provider]:
-        try:
-            key = st.secrets.get(name)
-        except Exception:
-            key = None
-        if key or os.environ.get(name):
-            return key or os.environ.get(name)
-    return st.session_state.get(f"api_key_{provider}") or None
+def get_api_key() -> str | None:
+    try:
+        key = st.secrets.get(KEY_NAME)
+    except Exception:
+        key = None
+    return key or os.environ.get(KEY_NAME) or st.session_state.get("api_key_claude") or None
 
 
 @st.cache_data(max_entries=30, ttl="1d", show_spinner=False)
-def cached_read(files: tuple[tuple[str, bytes], ...], include_lyrics: bool, provider: str,
-                model: str | None, _api_key: str | None):
-    return read_score(list(files), provider=provider, api_key=_api_key, model=model, include_lyrics=include_lyrics)
+def cached_read(files: tuple[tuple[str, bytes], ...], include_lyrics: bool, _api_key: str | None):
+    return read_score(list(files), api_key=_api_key, include_lyrics=include_lyrics)
 
 
 @st.cache_data(max_entries=50, show_spinner=False)
 def cached_key_options(text: str, mode: str, src: tp.Key, inst_id: str, ref: int, high_fs: bool,
                        fixed_c: bool) -> list[dict]:
     return tp.key_options(text, mode, src, tp.INSTRUMENT_BY_ID[inst_id], ref, high_fs, fixed_c)
-
-
-@st.cache_data(ttl="1h", max_entries=5, show_spinner=False)
-def gemini_models(_api_key: str | None, key_tag: str) -> tuple[list[str], str | None]:
-    return list_gemini_models(_api_key)
 
 
 @st.cache_data(max_entries=30, show_spinner=False)
@@ -117,11 +107,9 @@ def load_example():
 def run_reader():
     uploads = st.session_state.get("uploads") or []
     st.session_state.read_error = None
-    provider = st.session_state.get("provider", "claude")
-    model = st.session_state.get("gemini_model") if provider == "gemini" else None
     try:
         reading = cached_read(tuple((f.name, f.getvalue()) for f in uploads),
-                              st.session_state.get("lyrics", False), provider, model, get_api_key(provider))
+                              st.session_state.get("lyrics", False), get_api_key())
     except ScoreReadError as e:
         st.session_state.read_error = str(e)
         return
@@ -198,34 +186,14 @@ with st.sidebar:
     high_fs = st.toggle("我的樂器有高音 F♯ 鍵", key="high_fs")
 
     st.header("讀譜", divider="orange")
-    provider = st.segmented_control("讀譜 AI", list(PROVIDERS), format_func=PROVIDERS.get, default="claude",
-                                    required=True, key="provider", width="stretch")
-    env_hint = " 或 ".join(KEY_NAMES[provider])
-    if provider == "gemini":  # the Gemini key comes only from secrets or the environment, never typed in
-        if get_api_key("gemini"):
-            st.caption(":material/check_circle: 已從 secrets 讀到 Gemini API key")
-        else:
-            st.caption(":orange[還沒有設定 Gemini API key：請寫在 .streamlit/secrets.toml 的 GEMINI_API_KEY"
-                       "（雲端版寫在 App settings → Secrets）。]")
-    elif get_api_key(provider) is None or st.session_state.get(f"api_key_{provider}"):
+    if get_api_key() is None or st.session_state.get("api_key_claude"):
         st.text_input(
-            "Anthropic API key", type="password", key=f"api_key_{provider}",
-            help=f"上傳 JPG／PDF 時需要。也可以設定環境變數 {env_hint}，或寫在 .streamlit/secrets.toml。",
+            "Anthropic API key", type="password", key="api_key_claude",
+            help=f"上傳 JPG／PDF 時需要。也可以設定環境變數 {KEY_NAME}，或寫在 .streamlit/secrets.toml。",
         )
     else:
-        st.caption(f":material/check_circle: 已從環境變數或 secrets 讀到 {PROVIDERS[provider]} API key")
-    if provider == "gemini":
-        key = get_api_key("gemini")
-        models, list_error = gemini_models(key, str(hash(key)))
-        if list_error:
-            gemini_models.clear()  # don't keep the fallback list for an hour; retry on the next rerun
-            if key:
-                st.caption(f":orange[無法取得模型清單，暫用預設模型。原因：{list_error}]")
-        st.selectbox("Gemini 模型", models, key="gemini_model",
-                     help="清單來自你的 Gemini 帳戶。flash 模型速度快、有免費額度；pro 模型通常讀得較仔細。")
-        st.caption("免費方案有每分鐘、每天的次數限制，且依 Google 條款，資料可能被用來改進其產品。")
-    else:
-        st.caption("使用 Claude Opus 5.5，依用量向你的 Anthropic 帳戶收費。")
+        st.caption(":material/check_circle: 已從環境變數或 secrets 讀到 Anthropic API key")
+    st.caption("用 Claude Opus 5.5 讀譜，依用量向你的 Anthropic 帳戶收費。")
 
 # ---------- main ----------
 st.title("薩克斯風移調器")
@@ -248,13 +216,12 @@ with left:
                             st.image(png, width=110, caption=f"{f.name} 第 {i + 1} 頁", alt=f"{f.name} 第 {i + 1} 頁預覽")
                     else:
                         st.image(f, width=110, caption=f.name, alt=f"{f.name} 預覽")
-        has_key = get_api_key(provider) is not None
+        has_key = get_api_key() is not None
         st.toggle("一起抄寫歌詞（對齊在音符下方）", value=True, key="lyrics")
-        st.button(f"用 {PROVIDERS[provider]} 讀譜", icon=":material/auto_awesome:", type="primary",
+        st.button("用 Claude 讀譜", icon=":material/auto_awesome:", type="primary",
                   on_click=run_reader, disabled=not uploads or not has_key, width="stretch")
         if uploads and not has_key:
-            st.caption("請先在 .streamlit/secrets.toml 設定 GEMINI_API_KEY。" if provider == "gemini"
-                       else "請先在左側欄填入 Anthropic API key。")
+            st.caption("請先在左側欄填入 Anthropic API key。")
         if st.session_state.read_error:
             st.error(st.session_state.read_error, icon=":material/error:")
         reading = st.session_state.reading

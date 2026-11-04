@@ -1,6 +1,5 @@
 streamlit>=1.57
 anthropic>=2.4
-google-genai>=2.33
 pymupdf
 pillow
 pandas
