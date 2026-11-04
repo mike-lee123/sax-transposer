@@ -6,7 +6,6 @@ import io
 import json
 from dataclasses import dataclass
 
-import anthropic
 from PIL import Image
 
 CLAUDE_MODEL = "claude-opus-5-5"
@@ -126,6 +125,8 @@ def read_score(files: list[tuple[str, bytes]], api_key: str | None = None,
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                                          "data": base64.standard_b64encode(_jpeg(data)).decode()}})
     content.append({"type": "text", "text": _prompt(len(files), include_lyrics)})
+
+    import anthropic  # loaded only when reading a score: it takes ~1.5 s to import, which slowed every cold start
 
     client = anthropic.Anthropic(api_key=api_key) if api_key else anthropic.Anthropic()
     try:
