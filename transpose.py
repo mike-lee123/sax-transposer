@@ -526,6 +526,7 @@ class Result:
     fixed_c: bool = False  # write the sax part with fixed C fingering: 1 = written C5, accidentals on the notes
     sung_shift: int = 0  # extra octaves for the sung lines only (intro, interlude and outro stay put)
     interlude: set[int] = field(default_factory=set)  # line numbers treated as instrumental
+    dots_style: str = "score"  # "score" (octave dots like the song sheet) or "chart" (like a fingering chart)
 
     @property
     def key_label(self) -> str:
@@ -538,13 +539,21 @@ class Result:
     def shown(self, n: Note) -> tuple[int, int, int]:
         """(digit, accidental, octave dots) of a note as printed in the sax part.
 
-        Octave dots follow the sax fingering chart in both styles: undotted notes are the written
-        G4 … F♯5 run (G = left hand three fingers, C = left middle finger, D up with the octave key).
         With fixed C fingering the digit is the written letter (C = 1); otherwise it is the scale degree.
+        Octave dots, dots_style "score": like a song sheet, the undotted run is 1 … 7 from the tonic —
+        with fixed C fingering 1 = written C5 (left middle finger), so a tune moved to the horn's own key
+        keeps the original sheet's dots. "chart": like a sax fingering chart, the undotted run is
+        written G4 … F♯5 (5 6 7 1 2 3 4: G = left hand three fingers, D up with the octave key).
         """
         letter = (self.tgt.l + n.deg - 1) % 7
         acc = wrap(n.written % 12 - NAT[letter])
-        dots = (n.written - acc - 67) // 12  # 67 = written G4
+        if self.dots_style == "chart":
+            dots = (n.written - acc - 67) // 12  # 67 = written G4
+        elif self.fixed_c:
+            dots = (n.written - acc - 72) // 12  # 72 = written C5
+        else:
+            tonic = 60 + self.tgt.pc + (12 if self.tgt.pc < 7 else 0)  # tonic between G4 and F♯5
+            dots = round((n.written - n.acc - tonic - NAT[n.deg - 1]) / 12)
         return (letter + 1, acc, dots) if self.fixed_c else (n.deg, n.acc, dots)
     jianpu: str = ""
     jianpu_ascii: str = ""
@@ -618,7 +627,7 @@ def _esc(s: str) -> str:
 def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int = 0,
               octave: int | None = None, fix_single: bool = False, high_fs: bool = False,
               play: Key | None = None, fixed_c: bool = False, octave_shift: int = 0,
-              keep_interlude: bool = False) -> Result:
+              keep_interlude: bool = False, dots_style: str = "score") -> Result:
     """play: move the tune to this concert key (by the nearest interval) before writing it for the sax.
     fixed_c: write the sax part for players who read every jianpu with C fingering (see Result.shown).
     octave_shift: the player's extra octave up or down; with keep_interlude only the sung lines move."""
@@ -653,7 +662,8 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
     for n, w, f in zip(notes, ws, flags):
         n.written, n.flag = w, f
 
-    res = Result(parsed, src, tgt, inst, k, auto, high, lyric_lines, orig, shift, fixed_c, sung_shift, interlude)
+    res = Result(parsed, src, tgt, inst, k, auto, high, lyric_lines, orig, shift, fixed_c, sung_shift, interlude,
+                 dots_style)
     uni, asc, names, html = [], [], [], []
     line = 1
 
