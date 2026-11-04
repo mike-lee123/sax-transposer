@@ -140,13 +140,6 @@ with st.sidebar:
         help="固定 C 指法：不管什麼調，譜都寫成 1=C，點的位置照薩克斯風指法表：沒有點的 5 6 7 1＝左手三指 G、兩指 A、一指 B、中指 C（不按八度鍵），2 3 4 起按八度鍵，"
              "要升降的音直接標 ♯／♭。首調指法：譜寫成某一調（例如 1=G），用那一調的指法吹，可以自動選最好吹的調指法。",
     ) == "fixed"
-    dots_style = st.segmented_control(
-        "高低音點", ["score", "chart"], default="score", required=True, key="dots_style", width="stretch",
-        format_func={"score": "照原稿", "chart": "照指法表"}.get,
-        help="照原稿：點的位置跟一般歌譜一樣，沒有點的 1 2 3 4 5 6 7 從左手中指的 C 往上；"
-             "下面加點的 5̣ 6̣ 7̣＝左手三指、兩指、一指。照指法表：沒有點的是 5 6 7 1 2 3 4"
-             "（左手三指的 G 到加八度鍵的 F），跟薩克斯風指法表的中音區一樣。",
-    )
     key_choice = st.selectbox(
         "原曲調性（實音）", ["auto"] + list(range(len(tp.SOURCE_KEYS))), key="src_key",
         format_func=lambda i: "自動（依譜中的 1=）" if i == "auto"
@@ -283,7 +276,7 @@ elif play_choice in ("same", "auto"):
 else:
     play = tp.SOURCE_KEYS[play_choice] if fixed_c else tp.concert_key(tp.FINGER_KEYS[play_choice], inst)
 res = tp.transpose(text, mode, src, inst, ref, octave, fix_single, high_fs, play, fixed_c, octave_shift,
-                   keep_interlude, dots_style)
+                   keep_interlude)
 
 with right:
     notes = res.notes
@@ -379,13 +372,12 @@ with right:
                 "</style>"
                 f'<div class="jp">{res.html}</div>'
             )
-            if dots_style == "chart":
-                dots_note = "點照指法表：沒有點的 5 6 7 1 2 3 4＝左手三指的 G 到加八度鍵的 F，上面加點＝高音，下面加點＝低音。"
-            elif fixed_c:
-                dots_note = ("點照原稿：沒有點的 1＝左手中指的 C，2 起按八度鍵；"
+            if fixed_c:
+                dots_note = ("高低音點依原稿移調後的音高決定：沒有點的 1＝左手中指的 C，2 起按八度鍵；"
                              "下面加點的 5̣ 6̣ 7̣＝左手三指、兩指、一指，1̇＝八度鍵加左手中指。")
             else:
-                dots_note = f"首調 1＝{res.tgt.jianpu}；點照原稿：沒有點的 1 2 3 4 5 6 7 從主音往上，上面加點＝高音，下面加點＝低音。"
+                dots_note = (f"首調 1＝{res.tgt.jianpu}；高低音點依原稿移調後的音高決定："
+                             "沒有點的 1 2 3 4 5 6 7 從主音往上，上面加點＝高音，下面加點＝低音。")
             st.caption(dots_note + "滑鼠移到音符上可看記譜音名和實音。"
                        "紅色＝超出音域，橘色＝已移八度。底線＝八分音符（兩條＝十六分），上方的 3＝三連音。")
             t1, t2, t3 = st.tabs(["簡譜（點號）", "簡譜（純文字）", "記譜音名"])
