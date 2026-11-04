@@ -74,8 +74,9 @@ INSTRUMENTS = [
     Instrument("alto", "中音薩克斯風", "Alto", "E♭", 9, 5, "上移大六度"),
     Instrument("tenor", "次中音薩克斯風", "Tenor", "B♭", 14, 1, "上移八度＋大二度"),
     Instrument("bari", "上低音薩克斯風", "Baritone", "E♭", 21, 5, "上移八度＋大六度"),
-    # A digital sax (e.g. Yamaha YDS-150) set to the key of C: written = concert, only the octave is chosen.
-    Instrument("c", "YDS（C 調）", "C (digital sax set to C)", "C", 0, 0, "不移調，照實音寫"),
+    # A C instrument, e.g. a Yamaha YDS-150 on a C.xx (non-sax) Voice or a user Voice set to C in the
+    # YDS Controller app: written = concert, only the octave is chosen. Its sax Voices follow the real horns.
+    Instrument("c", "C 調（YDS C 音色）", "C instrument (YDS-150 C.xx Voice)", "C", 0, 0, "不移調，照實音寫"),
 ]
 INSTRUMENT_BY_ID = {i.id: i for i in INSTRUMENTS}
 

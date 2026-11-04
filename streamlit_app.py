@@ -140,8 +140,9 @@ with st.sidebar:
         "樂器", [i.id for i in tp.INSTRUMENTS], default="alto", required=True, key="inst",
         format_func=lambda i: tp.INSTRUMENT_BY_ID[i].name if i == "c"
         else f"{tp.INSTRUMENT_BY_ID[i].name.replace('薩克斯風', '')} {tp.INSTRUMENT_BY_ID[i].tune}",
-        help="數位薩克斯風（例如 Yamaha YDS-150）：樂器的調設成 E♭ 就選中音 E♭，設成 B♭ 選高音或次中音 B♭，"
-             "設成 C 就選「YDS（C 調）」。",
+        help="Yamaha YDS-150 的調性跟著音色走：A.01–A.17（中音薩克斯風）選中音 E♭；S.xx（高音）選高音 B♭；"
+             "T.xx（次中音）選次中音 B♭；B.xx（上低音）選上低音 E♭；"
+             "C.01–C.17（口琴、尺八、笛子等）或在 YDS Controller app 自訂成 C 調的音色，選「C 調（YDS C 音色）」。",
         width="stretch",
     )
     inst = tp.INSTRUMENT_BY_ID[inst_id]
