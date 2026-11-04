@@ -231,8 +231,8 @@ def build_pdf(res: tp.Result, title: str = "") -> bytes:
     page.insert_text((MARGIN, y + 16), heading, fontname=FONT, fontsize=20)
     moved = f"→ 移到 1={res.src.jianpu} " if res.orig else ""
     orig = res.orig or res.src
-    written = ("記譜 1=C（固定 C 指法：中音 1＝左手中指 C）" if res.fixed_c
-               else f"記譜 1={res.tgt.jianpu}（{tp.sig_long(res.tgt.sig)}）")
+    written = ("記譜 1=C（固定 C 指法）" if res.fixed_c
+               else f"記譜 1={res.tgt.jianpu}（{res.tgt.jianpu} 調指法，{tp.sig_long(res.tgt.sig)}）")
     info = f"原曲 1={orig.jianpu}（{orig.label}）{moved}→ {written}　八度：{res.octave_text}"
     page.insert_text((MARGIN, y + 38), info, fontname=FONT, fontsize=9.5, color=GREY)
     y += 62

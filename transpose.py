@@ -84,6 +84,17 @@ SOURCE_KEYS = [Key(l, a) for l, a in [
     (4, -1), (4, 0), (5, -1), (5, 0), (6, -1), (6, 0),
 ]]
 
+# The twelve key fingerings a sax player reads movable-do jianpu in (written keys), most common first.
+FINGER_KEYS = [Key(l, a) for l, a in [
+    (0, 0), (3, 0), (4, 0), (1, 0), (6, -1), (2, -1), (5, 0), (5, -1), (2, 0), (1, -1), (6, 0), (3, 1),
+]]
+
+
+def concert_key(written: Key, inst: Instrument) -> Key:
+    """The concert key that this instrument reads as `written`."""
+    l = (written.l - inst.letters) % 7
+    return respell(Key(l, wrap((written.pc - inst.semis) % 12 - NAT[l])))
+
 
 def wrap(d: int) -> int:
     d %= 12
@@ -369,6 +380,38 @@ def parse(text: str, mode: str) -> Parsed:
     return Parsed(segs, header)
 
 
+R_INTERLUDE = re.compile(r"前奏|間奏|過門|尾奏|Intro|Interlude|Outro", re.I)
+R_SUNG = re.compile(r"主歌|副歌|歌唱|Verse|Chorus", re.I)
+
+
+def interlude_lines(text: str, notes: list[Note]) -> set[int]:
+    """Line numbers of instrumental melody lines (intro, interlude, outro). Call after attach_lyrics.
+
+    A line marked 「前奏／間奏／尾奏」 (on its own line or in front of the notes) starts an instrumental
+    part, which ends at a 「主歌／副歌」 mark or at a melody line with lyrics. When the score has lyrics,
+    every melody line without lyrics also counts as instrumental.
+    """
+    melody = {n.line for n in notes}
+    sung = {n.line for n in notes if any(n.lyrics)}
+    has_lyrics = bool(sung)
+    result: set[int] = set()
+    instrumental = False
+    for i, raw in enumerate(text.split("\n"), 1):
+        if R_LYRIC_LINE.match(raw):
+            continue
+        if R_INTERLUDE.search(raw):
+            instrumental = True
+        elif R_SUNG.search(raw):
+            instrumental = False
+        if i not in melody:
+            continue
+        if i in sung:
+            instrumental = False
+        elif instrumental or has_lyrics:
+            result.add(i)
+    return result
+
+
 def attach_lyrics(text: str, notes: list[Note]) -> set[int]:
     """Give each note its syllables from the 「詞：」 lines under its melody line.
 
@@ -418,13 +461,15 @@ def note_cost(w: int) -> float:
     return 0
 
 
-def fit_range(notes: list[Note], inst: Instrument, k: int, high: int) -> tuple[list[int], list[str]]:
+def fit_range(notes: list[Note], inst: Instrument, k: int, high: int,
+              extra: list[int] | None = None) -> tuple[list[int], list[str]]:
     """Written pitches at octave shift k, with out-of-range bars moved an octave as a whole.
 
+    extra: an additional octave shift per note (e.g. only the sung lines raised an octave).
     A bar that can't fit as a whole has only its out-of-range notes moved. Returns
     (written pitches, flags) with flag "moved" for moved notes and "out" for notes that still don't fit.
     """
-    ws = [n.midi + inst.semis + 12 * k for n in notes]
+    ws = [n.midi + inst.semis + 12 * (k + (extra[i] if extra else 0)) for i, n in enumerate(notes)]
     flags = [""] * len(notes)
     bars: dict[int, list[int]] = {}
     for i, n in enumerate(notes):
@@ -478,6 +523,8 @@ class Result:
     orig: Key | None = None  # key of the score as written, when the tune was moved to another key
     shift: int = 0  # semitones from orig to src
     fixed_c: bool = False  # write the sax part with fixed C fingering: 1 = written C5, accidentals on the notes
+    sung_shift: int = 0  # extra octaves for the sung lines only (intro, interlude and outro stay put)
+    interlude: set[int] = field(default_factory=set)  # line numbers treated as instrumental
 
     @property
     def key_label(self) -> str:
@@ -488,14 +535,16 @@ class Result:
         return "C" if self.fixed_c else self.tgt.jianpu_ascii
 
     def shown(self, n: Note) -> tuple[int, int, int]:
-        """(digit, accidental, octave dots) of a note as printed in the sax part."""
-        if not self.fixed_c:
-            return n.deg, n.acc, self.written_octave(n)
+        """(digit, accidental, octave dots) of a note as printed in the sax part.
+
+        Octave dots follow the sax fingering chart in both styles: undotted notes are the written
+        G4 … F♯5 run (G = left hand three fingers, C = left middle finger, D up with the octave key).
+        With fixed C fingering the digit is the written letter (C = 1); otherwise it is the scale degree.
+        """
         letter = (self.tgt.l + n.deg - 1) % 7
         acc = wrap(n.written % 12 - NAT[letter])
-        # Sax fingering-chart octaves: the undotted "middle" run is 5 6 7 1 2 3 4 = written G4 … F5
-        # (G = left hand three fingers, C = left middle finger, D up with the octave key).
-        return letter + 1, acc, (n.written - acc) // 12 - 1 - (5 if letter <= 3 else 4)
+        dots = (n.written - acc - 67) // 12  # 67 = written G4
+        return (letter + 1, acc, dots) if self.fixed_c else (n.deg, n.acc, dots)
     jianpu: str = ""
     jianpu_ascii: str = ""
     names: str = ""
@@ -520,17 +569,18 @@ class Result:
     def written_name(self, n: Note) -> str:
         return spell(n.written, (self.tgt.l + n.deg - 1) % 7)
 
-    def written_octave(self, n: Note) -> int:
-        return round((n.written - (60 + self.tgt.pc) - NAT[n.deg - 1] - n.acc) / 12)
-
     @property
     def octave_text(self) -> str:
         """The octave shift in words; after a key change it is relative to the moved tune, not the original."""
         if not self.orig:
-            return octave_words(self.octave)
-        if self.octave == 0:
-            return "不另外升降八度"
-        return f"再{'降' if self.octave < 0 else '升'}{['', '一', '兩', '三'][abs(self.octave)]}個八度"
+            text = octave_words(self.octave)
+        elif self.octave == 0:
+            text = "不另外升降八度"
+        else:
+            text = f"再{'降' if self.octave < 0 else '升'}{['', '一', '兩', '三'][abs(self.octave)]}個八度"
+        if self.sung_shift:
+            text += f"；唱的部分再{'降' if self.sung_shift < 0 else '升'}一個八度，間奏不變"
+        return text
 
     def chord(self, raw: str, ascii_acc: bool = False) -> str:
         """A chord symbol of the score, as the saxophonist reads it."""
@@ -566,9 +616,11 @@ def _esc(s: str) -> str:
 
 def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int = 0,
               octave: int | None = None, fix_single: bool = False, high_fs: bool = False,
-              play: Key | None = None, fixed_c: bool = False) -> Result:
+              play: Key | None = None, fixed_c: bool = False, octave_shift: int = 0,
+              keep_interlude: bool = False) -> Result:
     """play: move the tune to this concert key (by the nearest interval) before writing it for the sax.
-    fixed_c: write the sax part for players who read every jianpu with C fingering (see Result.shown)."""
+    fixed_c: write the sax part for players who read every jianpu with C fingering (see Result.shown).
+    octave_shift: the player's extra octave up or down; with keep_interlude only the sung lines move."""
     parsed = parse(text, mode)
     notes = parsed.notes
     assign_pitches(notes, src, ref_octave, mode)
@@ -581,16 +633,26 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
     auto = best_octave(notes, inst, high)
     k = auto if octave is None else octave
     tgt = target_key(src, inst)
+    lyric_lines = attach_lyrics(text, notes)
+    interlude: set[int] = set()
+    extra = None
+    sung_shift = 0
+    if octave_shift and keep_interlude:
+        interlude = interlude_lines(text, notes)
+        extra = [0 if n.line in interlude else octave_shift for n in notes]
+        sung_shift = octave_shift
+    else:
+        k += octave_shift
 
     if fix_single:
-        ws, flags = fit_range(notes, inst, k, high)
+        ws, flags = fit_range(notes, inst, k, high, extra)
     else:
-        ws = [n.midi + inst.semis + 12 * k for n in notes]
+        ws = [n.midi + inst.semis + 12 * (k + (extra[i] if extra else 0)) for i, n in enumerate(notes)]
         flags = ["out" if w < LOWEST or w > high else "" for w in ws]
     for n, w, f in zip(notes, ws, flags):
         n.written, n.flag = w, f
 
-    res = Result(parsed, src, tgt, inst, k, auto, high, attach_lyrics(text, notes), orig, shift, fixed_c)
+    res = Result(parsed, src, tgt, inst, k, auto, high, lyric_lines, orig, shift, fixed_c, sung_shift, interlude)
     uni, asc, names, html = [], [], [], []
     line = 1
 
@@ -682,8 +744,7 @@ def transpose(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int 
     return res
 
 
-COMFORT_LOW, COMFORT_HIGH = 62, 81  # written D4–A5: no low pinky keys, no top-register notes
-COMFORT_HIGH_FIXED_C = 85  # with fixed C fingering up to C♯6 reads as a plain dotted note: no palm keys yet
+COMFORT_LOW, COMFORT_HIGH = 62, 85  # written D4–C♯6: no low pinky keys, no palm keys
 
 
 def key_options(text: str, mode: str, src: Key, inst: Instrument, ref_octave: int = 0,
@@ -695,7 +756,6 @@ def key_options(text: str, mode: str, src: Key, inst: Instrument, ref_octave: in
     signature, or with fixed C fingering every note that carries ♯ or ♭), and how far it moves
     from the original key.
     """
-    high_ok = COMFORT_HIGH_FIXED_C if fixed_c else COMFORT_HIGH
     rows = []
     for key in SOURCE_KEYS:
         if key == Key(4, -1):  # G♭ sounds the same as F♯
@@ -705,7 +765,7 @@ def key_options(text: str, mode: str, src: Key, inst: Instrument, ref_octave: in
             r = transpose(text, mode, src, inst, ref_octave, k, True, high_fs, key, fixed_c)
             if not r.notes:
                 return []
-            uncomfortable = sum(not COMFORT_LOW <= n.written <= high_ok for n in r.notes)
+            uncomfortable = sum(not COMFORT_LOW <= n.written <= COMFORT_HIGH for n in r.notes)
             accidentals = sum(r.shown(n)[1] != 0 for n in r.notes) if fixed_c else 2 * abs(r.tgt.sig)
             score = (1000 * r.out_count + 3 * r.moved_count + uncomfortable
                      + accidentals + 0.5 * abs(r.shift) + 0.5 * abs(k))
@@ -715,9 +775,11 @@ def key_options(text: str, mode: str, src: Key, inst: Instrument, ref_octave: in
         lo = min(r.notes, key=lambda n: n.written)
         hi = max(r.notes, key=lambda n: n.written)
         sharps_flats = sum(r.shown(n)[1] != 0 for n in r.notes)
+        moved = "（原調）" if key.pc == src.pc else f"（{'升' if r.shift > 0 else '降'} {abs(r.shift)} 個半音）"
         rows.append({
-            "演奏調性": f"1={key.jianpu}" + ("（原調）" if key.pc == src.pc else f"（{'升' if r.shift > 0 else '降'} {abs(r.shift)} 個半音）"),
-            **({"要吹升降的音": sharps_flats} if fixed_c else {"記譜調": f"1={r.tgt.jianpu}（{sig_short(r.tgt.sig)}）"}),
+            **({} if fixed_c else {"指法": f"{r.tgt.jianpu} 調指法（{sig_short(r.tgt.sig)}）"}),
+            "演奏調性": f"1={key.jianpu}{moved}",
+            **({"要吹升降的音": sharps_flats} if fixed_c else {}),
             "記譜音域": f"{r.written_name(lo)} – {r.written_name(hi)}",
             "太低或太高的音": uncomfortable,
             "需移八度的音": r.moved_count,

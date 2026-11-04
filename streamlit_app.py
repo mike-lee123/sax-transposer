@@ -147,29 +147,50 @@ with st.sidebar:
     inst = tp.INSTRUMENT_BY_ID[inst_id]
     fixed_c = st.segmented_control(
         "簡譜寫法", ["fixed", "movable"], default="fixed", required=True, key="notation_style", width="stretch",
-        format_func={"fixed": "固定 C 指法", "movable": "首調（跟 1= 換指法）"}.get,
+        format_func={"fixed": "固定 C 指法", "movable": "首調指法（12 調）"}.get,
         help="固定 C 指法：不管什麼調，譜都寫成 1=C，點的位置照薩克斯風指法表：沒有點的 5 6 7 1＝左手三指 G、兩指 A、一指 B、中指 C（不按八度鍵），2 3 4 起按八度鍵，"
-             "要升降的音直接標 ♯／♭。首調：譜寫成記譜調（例如 1=G），1 就按那個調的主音。",
+             "要升降的音直接標 ♯／♭。首調指法：譜寫成某一調（例如 1=G），用那一調的指法吹，可以自動選最好吹的調指法。",
     ) == "fixed"
     key_choice = st.selectbox(
         "原曲調性（實音）", ["auto"] + list(range(len(tp.SOURCE_KEYS))), key="src_key",
         format_func=lambda i: "自動（依譜中的 1=）" if i == "auto"
         else f"{tp.SOURCE_KEYS[i].label}　1={tp.SOURCE_KEYS[i].jianpu}",
     )
-    play_choice = st.selectbox(
-        "演奏調性（移到別的調）", ["same", "auto"] + list(range(len(tp.SOURCE_KEYS))), key="play_key", index=1,
-        format_func=lambda i: {"same": "與原曲相同", "auto": "自動推薦（這把樂器最好吹的調）"}.get(i)
-        or f"{tp.SOURCE_KEYS[i].label}　1={tp.SOURCE_KEYS[i].jianpu}",
-        help="整首歌移到另一個調演奏（例如配合歌手的音域，或讓旋律落在比較好吹的音區），"
-             "會往最近的方向移，最多六個半音。和弦一起移調。"
-             "「自動推薦」會挑出全部音都在 D4–A5 好吹音區、調號最簡單的調。",
-    )
+    if fixed_c:
+        play_choice = st.selectbox(
+            "演奏調性（移到別的調）", ["same", "auto"] + list(range(len(tp.SOURCE_KEYS))), key="play_key", index=1,
+            format_func=lambda i: {"same": "與原曲相同", "auto": "自動推薦（這把樂器最好吹的調）"}.get(i)
+            or f"{tp.SOURCE_KEYS[i].label}　1={tp.SOURCE_KEYS[i].jianpu}",
+            help="整首歌移到另一個調演奏（例如配合歌手的音域，或讓旋律落在比較好吹的音區），"
+                 "會往最近的方向移，最多六個半音。和弦一起移調。"
+                 "「自動推薦」會挑出不用升降、全部音都在好吹音區的調。",
+        )
+    else:
+        play_choice = st.selectbox(
+            "指法（用哪一調的指法吹）", ["auto", "same"] + list(range(len(tp.FINGER_KEYS))), key="finger_key",
+            format_func=lambda i: {"auto": "自動選擇（最好吹的指法）", "same": "跟原曲（不移調）"}.get(i)
+            or f"{tp.FINGER_KEYS[i].jianpu} 調指法（{tp.sig_short(tp.FINGER_KEYS[i].sig)}）",
+            help="選一個你熟悉的調指法，整首歌會移到用那一調指法吹的調；依常用程度排列。"
+                 "「自動選擇」挑升降記號最少、全部音都在好吹音區的指法；"
+                 "「跟原曲」不移調，適合配原曲伴奏。",
+        )
     ref_octave = st.selectbox(
         "簡譜中音 1 的實際音高", [0, -1, 1], key="ref_oct",
         format_func=lambda r: {0: "中央 C 到上方 B 之間（預設）", -1: "低一個八度", 1: "高一個八度"}[r],
         help="簡譜沒有絕對音高。預設把中音 1 放在中央 C（C4）到 B4 之間，適合一般人聲旋律。",
     )
     octave = st.selectbox("實際聲音的八度", list(OCTAVES), format_func=OCTAVES.get, key="octave")
+    octave_choice = st.selectbox(
+        "原曲提高／降低八度", ["0", "+1", "+1v", "-1", "-1v"], key="octave_shift",
+        format_func={"0": "不變（預設）", "+1": "提高一個八度", "+1v": "提高一個八度（間奏不提高）",
+                     "-1": "降低一個八度", "-1v": "降低一個八度（間奏不降低）"}.get,
+        help="在上面選好的八度（包括自動推薦）之外，整首或只有唱的部分再提高或降低一個八度。"
+             "間奏的判斷：有歌詞時，沒有歌詞的旋律行就是前奏／間奏／尾奏；"
+             "也可以在曲譜文字裡寫一行「間奏」（或前奏、尾奏），到「主歌／副歌」或有歌詞的行為止。"
+             "超出樂器音域的小節會自動移回來，並以橘色標示。",
+    )
+    octave_shift = int(octave_choice.rstrip("v"))
+    keep_interlude = octave_choice.endswith("v")
     fix_single = st.toggle("把超出音域的單音自動移八度", value=True, key="fix",
                            help="開啟時保證每個音都在樂器音域內，被移動的音以橘色標示。"
                                 "常見原因是讀譜時八度點讀錯，可以對照原譜修正曲譜文字。")
@@ -276,9 +297,12 @@ if play_choice == "auto" and options:
     play = options[0]["key"]
     if octave is None:
         octave = options[0]["octave"]
+elif play_choice in ("same", "auto"):
+    play = None
 else:
-    play = None if play_choice in ("same", "auto") else tp.SOURCE_KEYS[play_choice]
-res = tp.transpose(text, mode, src, inst, ref, octave, fix_single, high_fs, play, fixed_c)
+    play = tp.SOURCE_KEYS[play_choice] if fixed_c else tp.concert_key(tp.FINGER_KEYS[play_choice], inst)
+res = tp.transpose(text, mode, src, inst, ref, octave, fix_single, high_fs, play, fixed_c, octave_shift,
+                   keep_interlude)
 
 with right:
     notes = res.notes
@@ -292,10 +316,11 @@ with right:
         else:
             status = "全部可吹"
         with st.container(horizontal=True):
-            st.metric("記譜調", f"1={res.key_label}", border=True)
             if fixed_c:
+                st.metric("記譜調", "1=C", border=True)
                 st.metric("要吹升降的音", sum(res.shown(n)[1] != 0 for n in notes), border=True)
             else:
+                st.metric("指法", f"{res.tgt.jianpu} 調指法", border=True)
                 st.metric("調號", tp.sig_short(res.tgt.sig), border=True)
             st.metric("實際聲音", res.octave_text, border=True)
             st.metric("音域檢查", status, border=True)
@@ -310,25 +335,36 @@ with right:
             + f"每個音{inst.interval}；八度：{res.octave_text}{auto_note}。"
             + ("" if key_choice != "auto" or header else "  \n:orange[譜中沒有寫 1=，暫時當作 C 調。請在左側欄選擇原曲調性。]")
         )
+        if keep_interlude:
+            verb = "提高" if octave_shift > 0 else "降低"
+            if res.interlude:
+                st.caption(f"當作前奏／間奏／尾奏、沒有{verb}的行："
+                           + "、".join(f"第 {i} 行" for i in sorted(res.interlude)))
+            else:
+                st.warning(f"找不到間奏，所以整首都{verb}了。請在讀譜時一起抄寫歌詞，"
+                           "或在曲譜文字裡間奏的前一行寫「間奏」。", icon=":material/info:")
         if options:
             best = options[0]
             if play_choice == "auto":
-                written = "1=C（固定 C 指法）" if fixed_c else best["記譜調"]
-                st.success(f"自動推薦：{best['演奏調性']}，{inst.name}記譜 {written}，音域 {best['記譜音域']}。",
-                           icon=":material/recommend:")
+                if fixed_c:
+                    st.success(f"自動推薦：{best['演奏調性']}，{inst.name}記譜 1=C（固定 C 指法），"
+                               f"音域 {best['記譜音域']}。", icon=":material/recommend:")
+                else:
+                    st.success(f"自動選擇：用 **{best['指法']}**，演奏 {best['演奏調性']}，音域 {best['記譜音域']}。",
+                               icon=":material/recommend:")
             with st.expander(f"{inst.name}吹這首歌，各調好不好吹", icon=":material/tune:",
                              expanded=play_choice == "auto"):
                 st.dataframe(
                     pd.DataFrame(options).drop(columns=["key", "octave", "score"]), hide_index=True,
                     column_config={
                         "太低或太高的音": st.column_config.NumberColumn(
-                            help="低於 D4（要用左手小指的低音鍵）或高於 A5 的音", format="%d"),
+                            help="低於 D4（要用低音鍵）或高於 C♯6（要用手掌鍵）的音", format="%d"),
                         "需移八度的音": st.column_config.NumberColumn(format="%d"),
                     },
                     alt="這首歌移到各調時的記譜調、音域與難吹的音數，最好吹的排在最前面",
                 )
                 st.caption("由上到下越好吹：先看要不要移八度，再看太低、太高的音，再看調號的升降記號數，"
-                           "最後看離原調多遠。想用哪一個，就在左側欄「演奏調性」選它。")
+                           "最後看離原調多遠。想用哪一個，就在左側欄「演奏調性」或「指法」選它。")
 
         with st.container(border=True):
             st.subheader(f":material/music_note: {inst.name}譜", anchor=False)
@@ -363,7 +399,7 @@ with right:
                 f'<div class="jp">{res.html}</div>'
             )
             st.caption(("固定 C 指法：沒有點的 5 6 7 1＝左手三指、兩指、一指、中指（不按八度鍵），2 3 4 起按八度鍵；上面加點＝高音，下面加點＝低音。" if fixed_c
-                        else "簡譜八度以記譜 C4–B4 之間的 1 為中音。")
+                        else f"首調：1＝{res.tgt.jianpu}。點的位置照薩克斯風指法表：沒有點＝左手三指的 G 到加八度鍵的 F♯ 這一段，上面加點＝高音，下面加點＝低音。")
                        + "滑鼠移到音符上可看記譜音名和實音。"
                        "紅色＝超出音域，橘色＝已移八度。底線＝八分音符（兩條＝十六分），上方的 3＝三連音。")
             t1, t2, t3 = st.tabs(["簡譜（點號）", "簡譜（純文字）", "記譜音名"])
