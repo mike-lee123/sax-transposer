@@ -201,10 +201,15 @@ with st.sidebar:
     provider = st.segmented_control("讀譜 AI", list(PROVIDERS), format_func=PROVIDERS.get, default="claude",
                                     required=True, key="provider", width="stretch")
     env_hint = " 或 ".join(KEY_NAMES[provider])
-    if get_api_key(provider) is None or st.session_state.get(f"api_key_{provider}"):
+    if provider == "gemini":  # the Gemini key comes only from secrets or the environment, never typed in
+        if get_api_key("gemini"):
+            st.caption(":material/check_circle: 已從 secrets 讀到 Gemini API key")
+        else:
+            st.caption(":orange[還沒有設定 Gemini API key：請寫在 .streamlit/secrets.toml 的 GEMINI_API_KEY"
+                       "（雲端版寫在 App settings → Secrets）。]")
+    elif get_api_key(provider) is None or st.session_state.get(f"api_key_{provider}"):
         st.text_input(
-            "Anthropic API key" if provider == "claude" else "Gemini API key", type="password",
-            key=f"api_key_{provider}",
+            "Anthropic API key", type="password", key=f"api_key_{provider}",
             help=f"上傳 JPG／PDF 時需要。也可以設定環境變數 {env_hint}，或寫在 .streamlit/secrets.toml。",
         )
     else:
@@ -248,7 +253,8 @@ with left:
         st.button(f"用 {PROVIDERS[provider]} 讀譜", icon=":material/auto_awesome:", type="primary",
                   on_click=run_reader, disabled=not uploads or not has_key, width="stretch")
         if uploads and not has_key:
-            st.caption(f"請先在左側欄填入 {PROVIDERS[provider]} API key。")
+            st.caption("請先在 .streamlit/secrets.toml 設定 GEMINI_API_KEY。" if provider == "gemini"
+                       else "請先在左側欄填入 Anthropic API key。")
         if st.session_state.read_error:
             st.error(st.session_state.read_error, icon=":material/error:")
         reading = st.session_state.reading
